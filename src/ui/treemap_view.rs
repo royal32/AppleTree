@@ -29,8 +29,8 @@ struct LayoutItem {
 
 const CUSHION_HEIGHT: f64 = 0.38;
 const CUSHION_SCALE: f64 = 0.91;
-const FOLDER_HEADER_H: f64 = 17.0;
-const FOLDER_PAD: f64 = 2.0;
+const FOLDER_HEADER_H: f64 = 9.0;
+const FOLDER_PAD: f64 = 1.0;
 const MIN_HEADER_W: f64 = 42.0;
 const MIN_HEADER_H: f64 = FOLDER_HEADER_H + FOLDER_PAD * 2.0 + 6.0;
 
@@ -473,7 +473,7 @@ fn paint_folder_labels_and_borders(
                 label_pos,
                 egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::proportional(11.0),
+                egui::FontId::monospace(8.0),
                 if deleted_nodes.contains(&node.id) {
                     Color32::from_rgb(255, 70, 70)
                 } else {
