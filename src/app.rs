@@ -380,7 +380,7 @@ impl LoadedState {
     fn show_treemap(&mut self, ui: &mut egui::Ui, prefs: &AppPrefs) -> Option<NodeCommand> {
         ui::treemap_view::show(
             ui,
-            &mut self.tree,
+            &self.tree,
             &mut self.pane,
             &self.color_map,
             &self.deleted,

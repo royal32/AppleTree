@@ -24,8 +24,7 @@ fn raw_extension(name: &str) -> &str {
     }
 }
 
-/// A node in the file tree. Uses compact representation (Box<str> + Box<[T]>)
-/// as validated by memory benchmarks: 40 bytes/struct, ~78 bytes RSS/node.
+/// A node in the file tree. Uses compact representation (Box<str> + Box<[T]>).
 pub struct FileNode {
     pub id: NodeId,
     pub name: Box<str>,
@@ -33,8 +32,6 @@ pub struct FileNode {
     pub is_dir: bool,
     pub children: Box<[FileNode]>,
     pub modified: Option<SystemTime>,
-    /// Treemap rectangle, set during layout.
-    pub rect: treemap::Rect,
     /// Cached file count (1 for files, sum of children for dirs).
     pub file_count: u64,
     /// Cached directory count (0 for files, 1 + sum of children for dirs).
@@ -66,18 +63,6 @@ impl FileNode {
         }
         for child in self.children.iter() {
             if let Some(node) = child.resolve_id(id) {
-                return Some(node);
-            }
-        }
-        None
-    }
-
-    pub fn resolve_id_mut(&mut self, id: NodeId) -> Option<&mut FileNode> {
-        if self.id == id {
-            return Some(self);
-        }
-        for child in self.children.iter_mut() {
-            if let Some(node) = child.resolve_id_mut(id) {
                 return Some(node);
             }
         }
@@ -257,7 +242,6 @@ fn build_node_fd(
                 is_dir: false,
                 children: Box::new([]),
                 modified: entry.modified,
-                rect: treemap::Rect::new(),
                 file_count: 1,
                 dir_count: 0,
             });
@@ -298,7 +282,6 @@ fn build_node_fd(
         is_dir: true,
         children: children.into(),
         modified,
-        rect: treemap::Rect::new(),
         file_count: total_file_count,
         dir_count: total_dir_count + 1,
     }
@@ -316,7 +299,6 @@ mod tests {
             is_dir: false,
             children: Box::new([]),
             modified: None,
-            rect: treemap::Rect::new(),
             file_count: 1,
             dir_count: 0,
         }
@@ -333,7 +315,6 @@ mod tests {
             is_dir: true,
             children: children.into(),
             modified: None,
-            rect: treemap::Rect::new(),
             file_count,
             dir_count,
         }
