@@ -32,6 +32,8 @@ struct LoadedState {
     expanded: BTreeSet<NodeId>,
     deleted_nodes: BTreeSet<NodeId>,
     deleted_outlines: BTreeSet<NodeId>,
+    treemap_root: NodeId,
+    zoom_history: Vec<NodeId>,
     active_pane: ActivePane,
     status_message: Option<String>,
     scan_time_ms: f64,
@@ -112,6 +114,7 @@ impl eframe::App for App {
             let color_map = ColorMap::from_extensions(&tree.extensions);
             let mut expanded = BTreeSet::new();
             expanded.insert(tree.root.id);
+            let treemap_root = tree.root.id;
             self.state = AppState::Loaded(Box::new(LoadedState {
                 tree,
                 color_map,
@@ -120,6 +123,8 @@ impl eframe::App for App {
                 expanded,
                 deleted_nodes: BTreeSet::new(),
                 deleted_outlines: BTreeSet::new(),
+                treemap_root,
+                zoom_history: Vec::new(),
                 active_pane: ActivePane::Table,
                 status_message: None,
                 scan_time_ms,
@@ -386,6 +391,7 @@ impl LoadedState {
         ui::treemap_view::show(
             ui,
             &mut self.tree,
+            self.treemap_root,
             &mut self.selected,
             &mut self.hovered,
             &mut self.active_pane,
@@ -572,7 +578,78 @@ fn execute_node_command(loaded: &mut LoadedState, ctx: &egui::Context, command: 
             }
             execute_delete(loaded, &target);
         }
+        NodeCommand::ZoomIn(id) => {
+            zoom_in_treemap(loaded, id);
+        }
+        NodeCommand::ZoomOut => {
+            zoom_out_treemap(loaded);
+        }
     }
+}
+
+fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
+    let Some(node) = loaded.tree.root.resolve_id(id) else {
+        loaded.status_message = Some("Cannot zoom: item no longer exists".to_owned());
+        return;
+    };
+    if !node.is_dir {
+        loaded.status_message = Some("Cannot zoom into a file".to_owned());
+        return;
+    }
+    if loaded.treemap_root == id {
+        return;
+    }
+    if node_contains_id(&loaded.tree, loaded.treemap_root, id) {
+        loaded.zoom_history.push(loaded.treemap_root);
+    } else {
+        loaded.zoom_history.clear();
+        if loaded.tree.root.id != id {
+            loaded.zoom_history.push(loaded.tree.root.id);
+        }
+    }
+    loaded.treemap_root = id;
+    loaded.selected = Some(id);
+    loaded.cached_layout_rect = None;
+    loaded.treemap_texture = None;
+}
+
+fn zoom_out_treemap(loaded: &mut LoadedState) {
+    if let Some(previous) = loaded.zoom_history.pop()
+        && loaded.tree.root.resolve_id(previous).is_some()
+    {
+        loaded.treemap_root = previous;
+        loaded.selected = Some(previous);
+        loaded.cached_layout_rect = None;
+        loaded.treemap_texture = None;
+        return;
+    }
+
+    if let Some(parent_id) = parent_id_for_node(&loaded.tree, loaded.treemap_root) {
+        loaded.treemap_root = parent_id;
+        loaded.selected = Some(parent_id);
+        loaded.cached_layout_rect = None;
+        loaded.treemap_texture = None;
+        return;
+    }
+
+    if let Some(path) = loaded.tree.build_fs_path_for_id(loaded.treemap_root)
+        && let Some(parent) = path.parent()
+        && parent != path
+    {
+        loaded.pending_scan = Some(parent.to_path_buf());
+    }
+}
+
+fn parent_id_for_node(tree: &FileTree, id: NodeId) -> Option<NodeId> {
+    let path = tree.root.path_to_id(id)?;
+    let (_, parent_path) = path.split_last()?;
+    tree.root.resolve_path(parent_path).map(|node| node.id)
+}
+
+fn node_contains_id(tree: &FileTree, root_id: NodeId, descendant_id: NodeId) -> bool {
+    tree.root
+        .resolve_id(root_id)
+        .is_some_and(|root| root.resolve_id(descendant_id).is_some())
 }
 
 fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {

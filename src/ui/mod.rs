@@ -15,4 +15,6 @@ pub enum NodeCommand {
     Reveal(NodeId),
     Delete { id: NodeId, confirm: bool },
     CopyPath(NodeId),
+    ZoomIn(NodeId),
+    ZoomOut,
 }

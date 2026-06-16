@@ -56,6 +56,7 @@ impl Mappable for LayoutItem {
 pub fn show(
     ui: &mut egui::Ui,
     tree: &mut FileTree,
+    treemap_root_id: NodeId,
     selected: &mut Option<NodeId>,
     hovered: &mut Option<NodeId>,
     active_pane: &mut ActivePane,
@@ -77,6 +78,11 @@ pub fn show(
 
     let w = canvas.width();
     let h = canvas.height();
+    let display_root_id = if tree.root.resolve_id(treemap_root_id).is_some() {
+        treemap_root_id
+    } else {
+        tree.root.id
+    };
 
     // Check if we need to re-layout and re-render the cushion texture.
     // Compare the full canvas rect (position + size) so that side panel
@@ -98,19 +104,16 @@ pub fn show(
             h as f64,
         );
 
-        layout_node(&mut tree.root, bounds, 0, prefs);
+        if let Some(root) = tree.root.resolve_id_mut(display_root_id) {
+            layout_node(root, bounds, 0, prefs);
+        }
 
         // Collect cushion leaves
         let mut leaves = Vec::new();
         let surface = [0.0f64; 4];
-        collect_cushion_leaves(
-            &tree.root,
-            surface,
-            CUSHION_HEIGHT,
-            true,
-            color_map,
-            &mut leaves,
-        );
+        if let Some(root) = tree.root.resolve_id(display_root_id) {
+            collect_cushion_leaves(root, surface, CUSHION_HEIGHT, true, color_map, &mut leaves);
+        }
 
         // Render cushion texture
         let pw = w as usize;
@@ -126,7 +129,11 @@ pub fn show(
         *cached_layout_rect = Some(canvas);
     }
 
-    paint_folder_backgrounds(&painter, &tree.root, 0, prefs);
+    let Some(display_root) = tree.root.resolve_id(display_root_id) else {
+        return command;
+    };
+
+    paint_folder_backgrounds(&painter, display_root, 0, prefs);
 
     // Paint the cached file-cushion texture over transparent folder content.
     if let Some(tex) = treemap_texture {
@@ -138,7 +145,7 @@ pub fn show(
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
     {
-        if let Some(id) = find_node_at(&tree.root, pos) {
+        if let Some(id) = find_node_at(display_root, pos) {
             *selected = Some(id);
             *active_pane = ActivePane::Treemap;
         } else {
@@ -152,7 +159,7 @@ pub fn show(
             .ctx()
             .pointer_latest_pos()
             .filter(|pos| canvas.contains(*pos))
-            .and_then(|pos| find_node_at(&tree.root, pos));
+            .and_then(|pos| find_node_at(display_root, pos));
 
         ui.ctx().data_mut(|data| {
             if let Some(id) = target {
@@ -173,7 +180,8 @@ pub fn show(
         .data_mut(|data| data.get_temp::<NodeId>(menu_target_key));
     if let Some(id) = menu_target {
         response.context_menu(|ui| {
-            node_context_menu(ui, id, &mut command);
+            let can_zoom_in = tree.root.resolve_id(id).is_some_and(|node| node.is_dir);
+            node_context_menu(ui, id, can_zoom_in, &mut command);
         });
     }
 
@@ -182,8 +190,8 @@ pub fn show(
         && !response.secondary_clicked()
         && let Some(pos) = response.hover_pos()
     {
-        if let Some(id) = find_node_at(&tree.root, pos)
-            && let Some(node) = tree.root.resolve_id(id)
+        if let Some(id) = find_node_at(display_root, pos)
+            && let Some(node) = display_root.resolve_id(id)
         {
             *hovered = Some(id);
             let full_path = tree
@@ -197,11 +205,11 @@ pub fn show(
         }
     }
 
-    paint_folder_labels_and_borders(&painter, &tree.root, 0, prefs, deleted_nodes);
-    paint_file_labels(&painter, &tree.root, 0, prefs);
+    paint_folder_labels_and_borders(&painter, display_root, 0, prefs, deleted_nodes);
+    paint_file_labels(&painter, display_root, 0, prefs);
 
     if let Some(hover_id) = *hovered
-        && let Some(node) = tree.root.resolve_id(hover_id)
+        && let Some(node) = display_root.resolve_id(hover_id)
     {
         let r = to_egui_rect(&node.rect);
         if r.width() > 0.0 && r.height() > 0.0 {
@@ -216,7 +224,7 @@ pub fn show(
 
     // Draw selection highlight
     if let Some(sel_id) = selected
-        && let Some(node) = tree.root.resolve_id(*sel_id)
+        && let Some(node) = display_root.resolve_id(*sel_id)
     {
         let r = to_egui_rect(&node.rect);
         if r.width() > 0.0 && r.height() > 0.0 {
@@ -229,7 +237,7 @@ pub fn show(
         }
     }
 
-    paint_deleted_outlines(&painter, &tree.root, deleted_outlines);
+    paint_deleted_outlines(&painter, display_root, deleted_outlines);
 
     command
 }
@@ -557,7 +565,21 @@ fn paint_deleted_outlines(
     }
 }
 
-fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCommand>) {
+fn node_context_menu(
+    ui: &mut egui::Ui,
+    id: NodeId,
+    can_zoom_in: bool,
+    command: &mut Option<NodeCommand>,
+) {
+    if can_zoom_in && ui.button("Zoom In").clicked() {
+        *command = Some(NodeCommand::ZoomIn(id));
+        ui.close_menu();
+    }
+    if ui.button("Zoom Out").clicked() {
+        *command = Some(NodeCommand::ZoomOut);
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button("Open").clicked() {
         *command = Some(NodeCommand::Open(id));
         ui.close_menu();

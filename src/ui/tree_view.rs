@@ -229,7 +229,7 @@ fn show_row(
             cell_resp.context_menu(|ui| {
                 *selected = Some(row.id);
                 *active_pane = ActivePane::Table;
-                node_context_menu(ui, row.id, &mut command);
+                node_context_menu(ui, row.id, row.is_dir, &mut command);
             });
             let is_deleted = row_is_deleted(row.id, deleted_nodes, deleted_outlines);
             paint_cell(
@@ -406,7 +406,21 @@ fn paint_text(
     }
 }
 
-fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCommand>) {
+fn node_context_menu(
+    ui: &mut egui::Ui,
+    id: NodeId,
+    can_zoom_in: bool,
+    command: &mut Option<NodeCommand>,
+) {
+    if can_zoom_in && ui.button("Zoom In Treemap").clicked() {
+        *command = Some(NodeCommand::ZoomIn(id));
+        ui.close_menu();
+    }
+    if ui.button("Zoom Out Treemap").clicked() {
+        *command = Some(NodeCommand::ZoomOut);
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button("Open").clicked() {
         *command = Some(NodeCommand::Open(id));
         ui.close_menu();

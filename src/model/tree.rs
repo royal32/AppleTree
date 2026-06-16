@@ -71,6 +71,18 @@ impl FileNode {
         None
     }
 
+    pub fn resolve_id_mut(&mut self, id: NodeId) -> Option<&mut FileNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in self.children.iter_mut() {
+            if let Some(node) = child.resolve_id_mut(id) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
     pub fn path_to_id(&self, id: NodeId) -> Option<TreePath> {
         let mut path = Vec::new();
         if self.find_path_to_id(id, &mut path) {
