@@ -131,7 +131,7 @@ fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool
                 egui::Align2::LEFT_CENTER,
                 format!("{}{}", column.title(), sort),
                 egui::FontId::proportional(12.0),
-                ui.visuals().text_color(),
+                Color32::from_rgb(220, 220, 220),
             );
 
             if response.clicked() {
@@ -263,7 +263,7 @@ fn paint_cell(
     } else if is_selected {
         Color32::WHITE
     } else {
-        ui.visuals().text_color()
+        Color32::from_rgb(220, 220, 220)
     };
     match column {
         TableColumn::Name => {
