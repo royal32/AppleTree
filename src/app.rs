@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -5,11 +6,14 @@ use eframe::egui;
 
 use crate::format_size;
 use crate::model::color::ColorMap;
-use crate::model::tree::{FileTree, TreePath};
-use crate::ui;
+use crate::model::tree::{FileTree, NodeId, TreePath};
+use crate::settings::{AppPrefs, SplitOrientation};
+use crate::ui::{self, ActivePane, NodeCommand};
 
 pub struct App {
     state: AppState,
+    prefs: AppPrefs,
+    prefs_changed: bool,
     #[cfg(target_os = "macos")]
     about_configured: bool,
 }
@@ -23,7 +27,11 @@ enum AppState {
 struct LoadedState {
     tree: FileTree,
     color_map: ColorMap,
-    selected: Option<TreePath>,
+    selected: Option<NodeId>,
+    hovered: Option<NodeId>,
+    expanded: BTreeSet<NodeId>,
+    active_pane: ActivePane,
+    status_message: Option<String>,
     scan_time_ms: f64,
     cached_layout_rect: Option<egui::Rect>,
     treemap_texture: Option<egui::TextureHandle>,
@@ -37,6 +45,8 @@ impl App {
 
         let mut app = Self {
             state: AppState::WaitingForPicker { frames: 2 },
+            prefs: AppPrefs::load(),
+            prefs_changed: false,
             #[cfg(target_os = "macos")]
             about_configured: false,
         };
@@ -98,10 +108,16 @@ impl eframe::App for App {
             let tree = FileTree::scan(path);
             let scan_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             let color_map = ColorMap::from_extensions(&tree.extensions);
+            let mut expanded = BTreeSet::new();
+            expanded.insert(tree.root.id);
             self.state = AppState::Loaded(Box::new(LoadedState {
                 tree,
                 color_map,
                 selected: None,
+                hovered: None,
+                expanded,
+                active_pane: ActivePane::Table,
+                status_message: None,
                 scan_time_ms,
                 cached_layout_rect: None,
                 treemap_texture: None,
@@ -136,8 +152,18 @@ impl eframe::App for App {
                 });
             }
             AppState::Loaded(loaded) => {
-                handle_delete(loaded, ctx);
-                loaded.as_mut().show_panels(ctx);
+                loaded.hovered = None;
+                let mut command = handle_delete(loaded, ctx);
+                if let Some(ui_command) =
+                    loaded
+                        .as_mut()
+                        .show_panels(ctx, &mut self.prefs, &mut self.prefs_changed)
+                {
+                    command = Some(ui_command);
+                }
+                if let Some(command) = command {
+                    execute_node_command(loaded, ctx, command);
+                }
             }
         }
 
@@ -154,17 +180,38 @@ impl eframe::App for App {
                 self.start_scan(path);
             }
         }
+
+        if self.prefs_changed {
+            self.prefs.save();
+            self.prefs_changed = false;
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.prefs.save();
     }
 }
 
 impl LoadedState {
-    fn show_panels(&mut self, ctx: &egui::Context) {
-        self.show_status_bar(ctx);
-        self.show_tree_panel(ctx);
-        self.show_central_panel(ctx);
+    fn show_panels(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+    ) -> Option<NodeCommand> {
+        let mut command = None;
+        self.show_status_bar(ctx, prefs, prefs_changed, &mut command);
+        self.show_main_layout(ctx, prefs, prefs_changed, &mut command);
+        command
     }
 
-    fn show_status_bar(&mut self, ctx: &egui::Context) {
+    fn show_status_bar(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+        command: &mut Option<NodeCommand>,
+    ) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!(
@@ -177,6 +224,14 @@ impl LoadedState {
                     format_size(self.tree.root.size),
                     self.scan_time_ms,
                 ));
+                if let Some(path) = self.status_path() {
+                    ui.separator();
+                    ui.label(path);
+                }
+                if let Some(message) = &self.status_message {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let has_selection = self.selected.is_some();
@@ -188,18 +243,9 @@ impl LoadedState {
                     });
                     let trash_btn = ui.add_enabled(has_selection, egui::Button::new(trash_text));
                     if trash_btn.clicked()
-                        && let Some(target) = self
-                            .selected
-                            .as_ref()
-                            .and_then(|sp| DeleteTarget::from_selection(&self.tree, sp))
-                        && native_confirm_delete(
-                            target.name(),
-                            target.size,
-                            &target.fs_path,
-                            target.is_dir,
-                        )
+                        && let Some(id) = self.selected
                     {
-                        execute_delete(self, &target);
+                        *command = Some(NodeCommand::Delete { id, confirm: true });
                     }
 
                     let reveal_btn = ui.add_enabled(
@@ -207,48 +253,146 @@ impl LoadedState {
                         egui::Button::new("\u{1F50D} Reveal in Finder"),
                     );
                     if reveal_btn.clicked()
-                        && let Some(sel_path) = self.selected.as_ref()
-                        && let Some(fs_path) = self.tree.build_fs_path(sel_path)
+                        && let Some(id) = self.selected
                     {
-                        reveal_in_finder(&fs_path);
+                        *command = Some(NodeCommand::Reveal(id));
+                    }
+
+                    ui.separator();
+                    let before_split = prefs.split_orientation;
+                    ui.selectable_value(
+                        &mut prefs.split_orientation,
+                        SplitOrientation::TopBottom,
+                        "Top/Bottom",
+                    );
+                    ui.selectable_value(
+                        &mut prefs.split_orientation,
+                        SplitOrientation::LeftRight,
+                        "Left/Right",
+                    );
+                    if prefs.split_orientation != before_split {
+                        prefs.mark_changed(prefs_changed);
+                    }
+
+                    ui.separator();
+                    let mut label_depth = prefs.treemap_label_depth as u32;
+                    let mut folder_depth = prefs.treemap_folder_depth as u32;
+                    if ui
+                        .add(egui::Slider::new(&mut label_depth, 0..=5).text("Labels"))
+                        .changed()
+                    {
+                        prefs.treemap_label_depth = label_depth as usize;
+                        prefs.mark_changed(prefs_changed);
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut folder_depth, 0..=6).text("Boxes"))
+                        .changed()
+                    {
+                        prefs.treemap_folder_depth = folder_depth as usize;
+                        prefs.mark_changed(prefs_changed);
                     }
                 });
             });
         });
     }
 
-    fn show_tree_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("tree_view")
-            .default_width(300.0)
-            .min_width(250.0)
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::side_top_panel(ctx.style().as_ref())
-                    .inner_margin(egui::Margin::from(8)),
-            )
-            .show(ctx, |ui| {
-                ui::tree_view::show(ui, &self.tree.root, &mut self.selected);
-            });
+    fn show_main_layout(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+        command: &mut Option<NodeCommand>,
+    ) {
+        match prefs.split_orientation {
+            SplitOrientation::LeftRight => {
+                egui::SidePanel::left("file_table")
+                    .default_width(520.0)
+                    .min_width(360.0)
+                    .show_separator_line(false)
+                    .frame(
+                        egui::Frame::side_top_panel(ctx.style().as_ref())
+                            .inner_margin(egui::Margin::from(8)),
+                    )
+                    .show(ctx, |ui| {
+                        if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
+                            *command = Some(cmd);
+                        }
+                    });
+
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    self.show_breadcrumb_area(ui);
+                    if let Some(cmd) = self.show_treemap(ui, prefs) {
+                        *command = Some(cmd);
+                    }
+                });
+            }
+            SplitOrientation::TopBottom => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    self.show_breadcrumb_area(ui);
+                    let table_h = (ui.available_height() * 0.42).max(220.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), table_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
+                                *command = Some(cmd);
+                            }
+                        },
+                    );
+                    ui.separator();
+                    if let Some(cmd) = self.show_treemap(ui, prefs) {
+                        *command = Some(cmd);
+                    }
+                });
+            }
+        }
     }
 
-    fn show_central_panel(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let mut new_scan_path: Option<PathBuf> = None;
-            self.show_breadcrumb(ui, &mut new_scan_path);
-            ui.add_space(2.0);
-            if let Some(path) = new_scan_path {
-                self.pending_scan = Some(path);
-            }
+    fn show_file_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+    ) -> Option<NodeCommand> {
+        ui::tree_view::show(
+            ui,
+            &self.tree,
+            &mut self.selected,
+            &mut self.hovered,
+            &mut self.expanded,
+            &mut self.active_pane,
+            prefs,
+            prefs_changed,
+        )
+    }
 
-            ui::treemap_view::show(
-                ui,
-                &mut self.tree,
-                &mut self.selected,
-                &self.color_map,
-                &mut self.cached_layout_rect,
-                &mut self.treemap_texture,
-            );
-        });
+    fn show_treemap(&mut self, ui: &mut egui::Ui, prefs: &AppPrefs) -> Option<NodeCommand> {
+        ui::treemap_view::show(
+            ui,
+            &mut self.tree,
+            &mut self.selected,
+            &mut self.hovered,
+            &mut self.active_pane,
+            &self.color_map,
+            prefs,
+            &mut self.cached_layout_rect,
+            &mut self.treemap_texture,
+        )
+    }
+
+    fn show_breadcrumb_area(&mut self, ui: &mut egui::Ui) {
+        let mut new_scan_path: Option<PathBuf> = None;
+        self.show_breadcrumb(ui, &mut new_scan_path);
+        ui.add_space(2.0);
+        if let Some(path) = new_scan_path {
+            self.pending_scan = Some(path);
+        }
+    }
+
+    fn status_path(&self) -> Option<String> {
+        self.hovered
+            .or(self.selected)
+            .and_then(|id| self.tree.full_display_path_for_id(id))
     }
 
     fn show_breadcrumb(&self, ui: &mut egui::Ui, new_scan_path: &mut Option<PathBuf>) {
@@ -336,6 +480,7 @@ impl LoadedState {
 
 /// Snapshot of a node's metadata needed for deletion.
 struct DeleteTarget {
+    id: NodeId,
     sel_path: TreePath,
     fs_path: std::path::PathBuf,
     is_dir: bool,
@@ -346,11 +491,13 @@ struct DeleteTarget {
 
 impl DeleteTarget {
     /// Resolve the selected node into a DeleteTarget, or None if the path is invalid.
-    fn from_selection(tree: &FileTree, sel_path: &[usize]) -> Option<Self> {
-        let fs_path = tree.build_fs_path(sel_path)?;
-        let node = tree.root.resolve_path(sel_path)?;
+    fn from_id(tree: &FileTree, id: NodeId) -> Option<Self> {
+        let sel_path = tree.root.path_to_id(id)?;
+        let fs_path = tree.build_fs_path(&sel_path)?;
+        let node = tree.root.resolve_id(id)?;
         Some(Self {
-            sel_path: sel_path.to_vec(),
+            id,
+            sel_path,
             fs_path,
             is_dir: node.is_dir,
             size: node.size,
@@ -368,29 +515,52 @@ impl DeleteTarget {
 }
 
 /// Handle Delete/Backspace when something is selected.
-/// ⌘Delete: delete immediately (no confirmation).
-/// Delete alone: show native confirmation dialog.
-fn handle_delete(loaded: &mut LoadedState, ctx: &egui::Context) {
-    let Some(sel_path) = loaded.selected.as_ref() else {
-        return;
-    };
-    let (cmd_delete, bare_delete) = ctx.input(|i| {
+/// Shift+Delete bypasses confirmation; Delete alone confirms.
+fn handle_delete(loaded: &mut LoadedState, ctx: &egui::Context) -> Option<NodeCommand> {
+    let id = loaded.selected?;
+    let delete = ctx.input(|i| {
         let del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
-        let cmd = i.modifiers.command;
-        (del && cmd, del && !cmd)
+        del.then_some(!i.modifiers.shift)
     });
-    if !(cmd_delete || bare_delete) {
-        return;
+    delete.map(|confirm| NodeCommand::Delete { id, confirm })
+}
+
+fn execute_node_command(loaded: &mut LoadedState, ctx: &egui::Context, command: NodeCommand) {
+    loaded.status_message = None;
+    match command {
+        NodeCommand::Open(id) => {
+            if let Some(path) = loaded.tree.build_fs_path_for_id(id) {
+                open_path(&path, loaded);
+            }
+        }
+        NodeCommand::Reveal(id) => {
+            if let Some(path) = loaded.tree.build_fs_path_for_id(id) {
+                reveal_in_finder(&path, loaded);
+            }
+        }
+        NodeCommand::CopyPath(id) => {
+            if let Some(path) = loaded.tree.full_display_path_for_id(id) {
+                ctx.copy_text(path);
+            }
+        }
+        NodeCommand::Delete { id, confirm } => {
+            let Some(target) = DeleteTarget::from_id(&loaded.tree, id) else {
+                loaded.status_message = Some("Selected item no longer exists".to_owned());
+                return;
+            };
+            if confirm
+                && !native_confirm_delete(
+                    target.name(),
+                    target.size,
+                    &target.fs_path,
+                    target.is_dir,
+                )
+            {
+                return;
+            }
+            execute_delete(loaded, &target);
+        }
     }
-    let Some(target) = DeleteTarget::from_selection(&loaded.tree, sel_path) else {
-        return;
-    };
-    if !cmd_delete
-        && !native_confirm_delete(target.name(), target.size, &target.fs_path, target.is_dir)
-    {
-        return;
-    }
-    execute_delete(loaded, &target);
 }
 
 fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
@@ -411,11 +581,13 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
             loaded.tree.rebuild_extensions();
             loaded.color_map = ColorMap::from_extensions(&loaded.tree.extensions);
             loaded.selected = next_selection_after_delete(&loaded.tree.root, &target.sel_path);
+            loaded.hovered = None;
+            loaded.expanded.remove(&target.id);
             loaded.cached_layout_rect = None;
             loaded.treemap_texture = None;
         }
         Err(e) => {
-            eprintln!("Failed to delete {:?}: {}", target.fs_path, e);
+            loaded.status_message = Some(format!("Failed to delete {}: {}", target.name(), e));
         }
     }
 }
@@ -424,9 +596,9 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
 fn show_empty_panes(ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |_ui| {});
 
-    egui::SidePanel::left("tree_view")
-        .default_width(300.0)
-        .min_width(250.0)
+    egui::SidePanel::left("file_table")
+        .default_width(520.0)
+        .min_width(360.0)
         .show_separator_line(false)
         .frame(
             egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
@@ -442,13 +614,13 @@ fn show_empty_panes(ctx: &egui::Context) {
 fn next_selection_after_delete(
     root: &crate::model::tree::FileNode,
     deleted_path: &[usize],
-) -> Option<TreePath> {
+) -> Option<NodeId> {
     let (&deleted_idx, parent_path) = deleted_path.split_last()?;
 
     let parent = root.resolve_path(parent_path)?;
     let child_count = parent.children.len();
 
-    if child_count == 0 {
+    let next_path = if child_count == 0 {
         if parent_path.is_empty() {
             None
         } else {
@@ -462,16 +634,23 @@ fn next_selection_after_delete(
         let mut path = parent_path.to_vec();
         path.push(child_count - 1);
         Some(path)
-    }
+    }?;
+    root.resolve_path(&next_path).map(|node| node.id)
 }
 
-fn reveal_in_finder(path: &std::path::Path) {
+fn reveal_in_finder(path: &std::path::Path, loaded: &mut LoadedState) {
     if let Err(e) = std::process::Command::new("open")
         .arg("-R")
         .arg(path)
         .spawn()
     {
-        eprintln!("Failed to reveal {:?} in Finder: {}", path, e);
+        loaded.status_message = Some(format!("Failed to reveal {:?}: {}", path, e));
+    }
+}
+
+fn open_path(path: &std::path::Path, loaded: &mut LoadedState) {
+    if let Err(e) = std::process::Command::new("open").arg(path).spawn() {
+        loaded.status_message = Some(format!("Failed to open {:?}: {}", path, e));
     }
 }
 

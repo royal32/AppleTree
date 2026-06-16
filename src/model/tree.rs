@@ -2,8 +2,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use crate::scan::getattrlistbulk::{self, DirEntry};
+
+/// Stable scan-local identity for a node.
+pub type NodeId = u64;
 
 /// Index path from root to a node in the tree (e.g. [2, 0, 1] = root's 3rd child → 1st child → 2nd child).
 pub type TreePath = Vec<usize>;
@@ -22,10 +26,12 @@ fn raw_extension(name: &str) -> &str {
 /// A node in the file tree. Uses compact representation (Box<str> + Box<[T]>)
 /// as validated by memory benchmarks: 40 bytes/struct, ~78 bytes RSS/node.
 pub struct FileNode {
+    pub id: NodeId,
     pub name: Box<str>,
     pub size: u64,
     pub is_dir: bool,
     pub children: Box<[FileNode]>,
+    pub modified: Option<SystemTime>,
     /// Treemap rectangle, set during layout.
     pub rect: treemap::Rect,
     /// Cached file count (1 for files, sum of children for dirs).
@@ -53,6 +59,41 @@ impl FileNode {
         Some(node)
     }
 
+    pub fn resolve_id(&self, id: NodeId) -> Option<&FileNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in self.children.iter() {
+            if let Some(node) = child.resolve_id(id) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    pub fn path_to_id(&self, id: NodeId) -> Option<TreePath> {
+        let mut path = Vec::new();
+        if self.find_path_to_id(id, &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    fn find_path_to_id(&self, id: NodeId, path: &mut TreePath) -> bool {
+        if self.id == id {
+            return true;
+        }
+        for (idx, child) in self.children.iter().enumerate() {
+            path.push(idx);
+            if child.find_path_to_id(id, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+
     /// Remove the child at `index` from this node's children, updating size and counts.
     /// Returns the removed child.
     pub fn remove_child(&mut self, index: usize) -> FileNode {
@@ -78,7 +119,9 @@ impl FileTree {
     /// Build a file tree by scanning the given path using getattrlistbulk.
     pub fn scan(root: &Path) -> Self {
         let ext_map = Mutex::new(HashMap::<Box<str>, u64>::new());
-        let root_node = build_root_node(root);
+        let mut root_node = build_root_node(root);
+        let mut next_id = 1;
+        assign_node_ids(&mut root_node, &mut next_id);
 
         // Drain the main thread's local ext map
         LOCAL_EXT_MAP.with(|m| {
@@ -128,6 +171,17 @@ impl FileTree {
             node = child;
         }
         Some(fs_path)
+    }
+
+    pub fn build_fs_path_for_id(&self, id: NodeId) -> Option<std::path::PathBuf> {
+        self.root
+            .path_to_id(id)
+            .and_then(|path| self.build_fs_path(&path))
+    }
+
+    pub fn full_display_path_for_id(&self, id: NodeId) -> Option<String> {
+        self.build_fs_path_for_id(id)
+            .map(|path| path.display().to_string())
     }
 
     /// Remove the node at the given index path from the tree, updating all ancestor sizes/counts.
@@ -201,6 +255,14 @@ fn collect_extensions(node: &FileNode, map: &mut HashMap<Box<str>, u64>) {
     }
 }
 
+fn assign_node_ids(node: &mut FileNode, next_id: &mut NodeId) {
+    node.id = *next_id;
+    *next_id += 1;
+    for child in node.children.iter_mut() {
+        assign_node_ids(child, next_id);
+    }
+}
+
 fn build_root_node(path: &Path) -> FileNode {
     let fd = getattrlistbulk::open_dir(path);
     if fd < 0 {
@@ -210,14 +272,19 @@ fn build_root_node(path: &Path) -> FileNode {
         );
     }
     let name: Box<str> = path.display().to_string().into();
-    let node = build_node_fd(fd, name);
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let node = build_node_fd(fd, name, modified);
     getattrlistbulk::close_dir(fd);
     node
 }
 
 /// Build a FileNode from an already-opened directory fd.
 /// `node_name` is the display name for this node.
-fn build_node_fd(parent_fd: libc::c_int, node_name: Box<str>) -> FileNode {
+fn build_node_fd(
+    parent_fd: libc::c_int,
+    node_name: Box<str>,
+    modified: Option<SystemTime>,
+) -> FileNode {
     use rayon::prelude::*;
 
     let entries = getattrlistbulk::scan_dir_entries_fd(parent_fd);
@@ -245,10 +312,12 @@ fn build_node_fd(parent_fd: libc::c_int, node_name: Box<str>) -> FileNode {
                 *map.entry(key).or_default() += entry.file_size;
             });
             file_nodes.push(FileNode {
+                id: 0,
                 name: entry.name.clone(),
                 size: entry.file_size,
                 is_dir: false,
                 children: Box::new([]),
+                modified: entry.modified,
                 rect: treemap::Rect::new(),
                 file_count: 1,
                 dir_count: 0,
@@ -259,7 +328,7 @@ fn build_node_fd(parent_fd: libc::c_int, node_name: Box<str>) -> FileNode {
     // Recurse into subdirectories — use openat() relative to parent fd
     let build_child = |entry: &&DirEntry| -> FileNode {
         let child_fd = getattrlistbulk::openat_dir(parent_fd, &entry.name);
-        let node = build_node_fd(child_fd, entry.name.clone());
+        let node = build_node_fd(child_fd, entry.name.clone(), entry.modified);
         getattrlistbulk::close_dir(child_fd);
         node
     };
@@ -284,12 +353,93 @@ fn build_node_fd(parent_fd: libc::c_int, node_name: Box<str>) -> FileNode {
     children.sort_unstable_by(|a, b| b.size.cmp(&a.size));
 
     FileNode {
+        id: 0,
         name: node_name,
         size: total_size,
         is_dir: true,
         children: children.into(),
+        modified,
         rect: treemap::Rect::new(),
         file_count: total_file_count,
         dir_count: total_dir_count + 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(id: NodeId, name: &str, size: u64) -> FileNode {
+        FileNode {
+            id,
+            name: name.into(),
+            size,
+            is_dir: false,
+            children: Box::new([]),
+            modified: None,
+            rect: treemap::Rect::new(),
+            file_count: 1,
+            dir_count: 0,
+        }
+    }
+
+    fn dir(id: NodeId, name: &str, children: Vec<FileNode>) -> FileNode {
+        let size = children.iter().map(|child| child.size).sum();
+        let file_count = children.iter().map(|child| child.file_count).sum();
+        let dir_count = 1 + children.iter().map(|child| child.dir_count).sum::<u64>();
+        FileNode {
+            id,
+            name: name.into(),
+            size,
+            is_dir: true,
+            children: children.into(),
+            modified: None,
+            rect: treemap::Rect::new(),
+            file_count,
+            dir_count,
+        }
+    }
+
+    #[test]
+    fn resolves_node_ids_and_paths() {
+        let root = dir(
+            1,
+            "/tmp/root",
+            vec![
+                dir(2, "a", vec![file(3, "nested.txt", 10)]),
+                file(4, "b.bin", 20),
+            ],
+        );
+
+        assert_eq!(
+            root.resolve_id(3).map(|node| &*node.name),
+            Some("nested.txt")
+        );
+        assert_eq!(root.path_to_id(3), Some(vec![0, 0]));
+        assert_eq!(root.path_to_id(4), Some(vec![1]));
+        assert_eq!(root.path_to_id(99), None);
+    }
+
+    #[test]
+    fn file_tree_builds_paths_from_node_ids() {
+        let tree = FileTree {
+            root: dir(
+                1,
+                "/tmp/root",
+                vec![dir(2, "a", vec![file(3, "nested.txt", 10)])],
+            ),
+            root_path: "/tmp/root".to_owned(),
+            extensions: Vec::new(),
+        };
+
+        assert_eq!(
+            tree.build_fs_path_for_id(3)
+                .map(|path| path.display().to_string()),
+            Some("/tmp/root/a/nested.txt".to_owned())
+        );
+        assert_eq!(
+            tree.full_display_path_for_id(2),
+            Some("/tmp/root/a".to_owned())
+        );
     }
 }

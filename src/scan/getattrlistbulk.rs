@@ -23,6 +23,7 @@ const ATTR_BIT_MAP_COUNT: libc::c_ushort = 5;
 const ATTR_CMN_RETURNED_ATTRS: libc::attrgroup_t = 0x8000_0000;
 const ATTR_CMN_NAME: libc::attrgroup_t = 0x0000_0001;
 const ATTR_CMN_OBJTYPE: libc::attrgroup_t = 0x0000_0008;
+const ATTR_CMN_MODTIME: libc::attrgroup_t = 0x0000_0400;
 
 // fileattr bits
 const ATTR_FILE_TOTALSIZE: libc::attrgroup_t = 0x0000_0002;
@@ -35,6 +36,7 @@ pub(crate) struct DirEntry {
     pub name: Box<str>,
     pub is_dir: bool,
     pub file_size: u64,
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// Open a directory and return its fd, or -1 on error.
@@ -95,7 +97,8 @@ pub(crate) fn scan_dir_entries_fd(fd: libc::c_int) -> Vec<DirEntry> {
 
     let mut attrlist: libc::attrlist = unsafe { std::mem::zeroed() };
     attrlist.bitmapcount = ATTR_BIT_MAP_COUNT;
-    attrlist.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE;
+    attrlist.commonattr =
+        ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME;
     attrlist.fileattr = ATTR_FILE_TOTALSIZE;
 
     let mut results = Vec::new();
@@ -149,6 +152,14 @@ fn read_u64(buf: &[u8], offset: usize) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read a native-endian i64 from `buf` at `offset`. Returns 0 if out of bounds.
+fn read_i64(buf: &[u8], offset: usize) -> i64 {
+    buf.get(offset..offset + 8)
+        .and_then(|s| s.try_into().ok())
+        .map(i64::from_ne_bytes)
+        .unwrap_or(0)
+}
+
 /// Parse buffer entries into DirEntry directly (no intermediate struct).
 fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
     let buf_size = buffer.len();
@@ -168,6 +179,7 @@ fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
             offset += entry_length;
             continue;
         }
+        let returned_commonattr = read_u32(buffer, pos);
         let returned_fileattr = read_u32(buffer, pos + 12);
 
         let name_ref_pos = pos + 20;
@@ -199,8 +211,29 @@ fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
         let obj_type_pos = name_ref_pos + 8;
         let obj_type = read_u32(buffer, obj_type_pos);
 
+        let mut value_pos = obj_type_pos + 4;
+        let modified = if returned_commonattr & ATTR_CMN_MODTIME != 0 {
+            if value_pos + 16 <= entry_start + entry_length {
+                let secs = read_i64(buffer, value_pos);
+                let nanos = read_i64(buffer, value_pos + 8).max(0) as u32;
+                value_pos += 16;
+                if secs >= 0 {
+                    Some(
+                        std::time::UNIX_EPOCH
+                            + std::time::Duration::new(secs as u64, nanos.min(999_999_999)),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let file_size = if returned_fileattr & ATTR_FILE_TOTALSIZE != 0 {
-            read_u64(buffer, obj_type_pos + 4)
+            read_u64(buffer, value_pos)
         } else {
             0
         };
@@ -209,6 +242,7 @@ fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
             name,
             is_dir: obj_type == VDIR,
             file_size,
+            modified,
         });
         offset += entry_length;
     }

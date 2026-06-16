@@ -3,7 +3,9 @@ use treemap::{MapItem, Mappable, TreemapLayout};
 
 use crate::format_size;
 use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
-use crate::model::tree::{FileNode, FileTree, TreePath};
+use crate::model::tree::{FileNode, FileTree, NodeId};
+use crate::settings::AppPrefs;
+use crate::ui::{ActivePane, NodeCommand};
 
 /// Cushion surface coefficients: [a_x, a_y, c_x, c_y]
 /// z(x,y) = a_x*x^2 + a_y*y^2 + c_x*x + c_y*y
@@ -27,17 +29,21 @@ const BRIGHTNESS_FACTOR: f64 = 0.88 / PALETTE_BRIGHTNESS;
 pub fn show(
     ui: &mut egui::Ui,
     tree: &mut FileTree,
-    selected: &mut Option<TreePath>,
+    selected: &mut Option<NodeId>,
+    hovered: &mut Option<NodeId>,
+    active_pane: &mut ActivePane,
     color_map: &ColorMap,
+    prefs: &AppPrefs,
     cached_layout_rect: &mut Option<Rect>,
     treemap_texture: &mut Option<TextureHandle>,
-) {
+) -> Option<NodeCommand> {
+    let mut command = None;
     let available = ui.available_size();
     let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
     let canvas = response.rect;
 
     if canvas.width() < 2.0 || canvas.height() < 2.0 {
-        return;
+        return None;
     }
 
     let w = canvas.width();
@@ -102,31 +108,81 @@ pub fn show(
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
     {
-        let mut path = Vec::new();
-        if find_node_at(&tree.root, pos, &mut path) {
-            *selected = Some(path);
+        if let Some(id) = find_node_at(&tree.root, pos) {
+            *selected = Some(id);
+            *active_pane = ActivePane::Treemap;
         } else {
             *selected = None;
         }
     }
 
+    let menu_target_key = response.id.with("treemap_context_target");
+    if response.secondary_clicked() {
+        let target = ui
+            .ctx()
+            .pointer_latest_pos()
+            .filter(|pos| canvas.contains(*pos))
+            .and_then(|pos| find_node_at(&tree.root, pos));
+
+        ui.ctx().data_mut(|data| {
+            if let Some(id) = target {
+                data.insert_temp(menu_target_key, id);
+            } else {
+                data.remove::<NodeId>(menu_target_key);
+            }
+        });
+
+        if let Some(id) = target {
+            *selected = Some(id);
+            *active_pane = ActivePane::Treemap;
+        }
+    }
+
+    let menu_target = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<NodeId>(menu_target_key));
+    if let Some(id) = menu_target {
+        response.context_menu(|ui| {
+            node_context_menu(ui, id, &mut command);
+        });
+    }
+
     // Hover tooltip
     if let Some(pos) = response.hover_pos() {
-        let mut hover_path = Vec::new();
-        if find_node_at(&tree.root, pos, &mut hover_path)
-            && let Some(node) = resolve_path(&tree.root, &hover_path)
+        if let Some(id) = find_node_at(&tree.root, pos)
+            && let Some(node) = tree.root.resolve_id(id)
         {
-            let full_path = build_path(&tree.root, &hover_path);
+            *hovered = Some(id);
+            let full_path = tree
+                .full_display_path_for_id(id)
+                .unwrap_or_else(|| node.name.to_string());
             let tip = format!("{}\n{}", full_path, format_size(node.size));
             egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
+                ui.set_max_width(560.0);
                 ui.label(tip);
             });
         }
     }
 
+    paint_overlays(&painter, &tree.root, 0, prefs);
+
+    if let Some(hover_id) = *hovered
+        && let Some(node) = tree.root.resolve_id(hover_id)
+    {
+        let r = to_egui_rect(&node.rect);
+        if r.width() > 0.0 && r.height() > 0.0 {
+            painter.rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(1.0, Color32::WHITE),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+
     // Draw selection highlight
-    if let Some(sel_path) = selected
-        && let Some(node) = resolve_path(&tree.root, sel_path)
+    if let Some(sel_id) = selected
+        && let Some(node) = tree.root.resolve_id(*sel_id)
     {
         let r = to_egui_rect(&node.rect);
         if r.width() > 0.0 && r.height() > 0.0 {
@@ -138,6 +194,8 @@ pub fn show(
             );
         }
     }
+
+    command
 }
 
 fn layout_node(node: &mut FileNode, bounds: treemap::Rect) {
@@ -267,37 +325,68 @@ fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLea
     image
 }
 
-fn find_node_at(node: &FileNode, pos: egui::Pos2, path: &mut Vec<usize>) -> bool {
+fn find_node_at(node: &FileNode, pos: egui::Pos2) -> Option<NodeId> {
     let r = to_egui_rect(&node.rect);
     if !r.contains(pos) {
-        return false;
+        return None;
     }
 
-    for (i, child) in node.children.iter().enumerate() {
-        path.push(i);
-        if find_node_at(child, pos, path) {
-            return true;
-        }
-        path.pop();
-    }
-
-    true
-}
-
-fn resolve_path<'a>(root: &'a FileNode, path: &[usize]) -> Option<&'a FileNode> {
-    root.resolve_path(path)
-}
-
-fn build_path(root: &FileNode, path: &[usize]) -> String {
-    let mut parts = vec![&*root.name];
-    let mut node = root;
-    for &idx in path {
-        if let Some(child) = node.children.get(idx) {
-            parts.push(&child.name);
-            node = child;
+    for child in node.children.iter() {
+        if let Some(id) = find_node_at(child, pos) {
+            return Some(id);
         }
     }
-    parts.join("/")
+
+    Some(node.id)
+}
+
+fn paint_overlays(painter: &egui::Painter, node: &FileNode, depth: usize, prefs: &AppPrefs) {
+    let rect = to_egui_rect(&node.rect);
+    if node.is_dir && depth > 0 && depth <= prefs.treemap_folder_depth {
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::from_white_alpha(90)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if depth > 0
+        && depth <= prefs.treemap_label_depth
+        && rect.width() >= 64.0
+        && rect.height() >= 28.0
+    {
+        let label = format!("{}\n{}", node.name, format_size(node.size));
+        painter.text(
+            rect.left_top() + egui::vec2(4.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(11.0),
+            Color32::WHITE,
+        );
+    }
+    for child in node.children.iter() {
+        paint_overlays(painter, child, depth + 1, prefs);
+    }
+}
+
+fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCommand>) {
+    if ui.button("Open").clicked() {
+        *command = Some(NodeCommand::Open(id));
+        ui.close_menu();
+    }
+    if ui.button("Reveal in Finder").clicked() {
+        *command = Some(NodeCommand::Reveal(id));
+        ui.close_menu();
+    }
+    if ui.button("Copy Path").clicked() {
+        *command = Some(NodeCommand::CopyPath(id));
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Delete").clicked() {
+        *command = Some(NodeCommand::Delete { id, confirm: true });
+        ui.close_menu();
+    }
 }
 
 fn to_egui_rect(r: &treemap::Rect) -> Rect {

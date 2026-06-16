@@ -1,0 +1,269 @@
+use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitOrientation {
+    LeftRight,
+    TopBottom,
+}
+
+impl SplitOrientation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LeftRight => "left_right",
+            Self::TopBottom => "top_bottom",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "left_right" => Some(Self::LeftRight),
+            "top_bottom" => Some(Self::TopBottom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableColumn {
+    Name,
+    Size,
+    PercentOfParent,
+    Items,
+    Files,
+    Folders,
+    Modified,
+}
+
+impl TableColumn {
+    pub const ALL: [Self; 7] = [
+        Self::Name,
+        Self::Size,
+        Self::PercentOfParent,
+        Self::Items,
+        Self::Files,
+        Self::Folders,
+        Self::Modified,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Size => "Size",
+            Self::PercentOfParent => "% Parent",
+            Self::Items => "Items",
+            Self::Files => "Files",
+            Self::Folders => "Folders",
+            Self::Modified => "Modified",
+        }
+    }
+
+    pub fn default_width(self) -> f32 {
+        match self {
+            Self::Name => 240.0,
+            Self::Size => 82.0,
+            Self::PercentOfParent => 74.0,
+            Self::Items => 70.0,
+            Self::Files => 70.0,
+            Self::Folders => 70.0,
+            Self::Modified => 132.0,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Size => "size",
+            Self::PercentOfParent => "parent_pct",
+            Self::Items => "items",
+            Self::Files => "files",
+            Self::Folders => "folders",
+            Self::Modified => "modified",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "name" => Some(Self::Name),
+            "size" => Some(Self::Size),
+            "parent_pct" => Some(Self::PercentOfParent),
+            "items" => Some(Self::Items),
+            "files" => Some(Self::Files),
+            "folders" => Some(Self::Folders),
+            "modified" => Some(Self::Modified),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ColumnPrefs {
+    pub column: TableColumn,
+    pub width: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppPrefs {
+    pub split_orientation: SplitOrientation,
+    pub sort_column: TableColumn,
+    pub sort_descending: bool,
+    pub columns: Vec<ColumnPrefs>,
+    pub treemap_folder_depth: usize,
+    pub treemap_label_depth: usize,
+}
+
+impl Default for AppPrefs {
+    fn default() -> Self {
+        Self {
+            split_orientation: SplitOrientation::LeftRight,
+            sort_column: TableColumn::Size,
+            sort_descending: true,
+            columns: TableColumn::ALL
+                .into_iter()
+                .map(|column| ColumnPrefs {
+                    column,
+                    width: column.default_width(),
+                })
+                .collect(),
+            treemap_folder_depth: 2,
+            treemap_label_depth: 1,
+        }
+    }
+}
+
+impl AppPrefs {
+    pub fn load() -> Self {
+        let Some(path) = settings_path() else {
+            return Self::default();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+
+        let mut prefs = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "split" => {
+                    if let Some(split) = SplitOrientation::parse(value.trim()) {
+                        prefs.split_orientation = split;
+                    }
+                }
+                "sort" => {
+                    if let Some((column, direction)) = value.trim().split_once(':')
+                        && let Some(column) = TableColumn::parse(column)
+                    {
+                        prefs.sort_column = column;
+                        prefs.sort_descending = direction == "desc";
+                    }
+                }
+                "columns" => {
+                    let columns = parse_columns(value);
+                    if !columns.is_empty() {
+                        prefs.columns = columns;
+                    }
+                }
+                "treemap_folder_depth" => {
+                    if let Ok(depth) = value.trim().parse() {
+                        prefs.treemap_folder_depth = depth;
+                    }
+                }
+                "treemap_label_depth" => {
+                    if let Ok(depth) = value.trim().parse() {
+                        prefs.treemap_label_depth = depth;
+                    }
+                }
+                _ => {}
+            }
+        }
+        prefs.ensure_all_columns();
+        prefs
+    }
+
+    pub fn save(&self) {
+        let Some(path) = settings_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("Failed to create settings directory {:?}: {}", parent, e);
+            return;
+        }
+
+        let columns = self
+            .columns
+            .iter()
+            .map(|pref| format!("{}:{:.1}", pref.column.id(), pref.width))
+            .collect::<Vec<_>>()
+            .join(",");
+        let direction = if self.sort_descending { "desc" } else { "asc" };
+        let text = format!(
+            "split={}\nsort={}:{}\ncolumns={}\ntreemap_folder_depth={}\ntreemap_label_depth={}\n",
+            self.split_orientation.as_str(),
+            self.sort_column.id(),
+            direction,
+            columns,
+            self.treemap_folder_depth,
+            self.treemap_label_depth,
+        );
+        if let Err(e) = std::fs::write(&path, text) {
+            eprintln!("Failed to save settings {:?}: {}", path, e);
+        }
+    }
+
+    pub fn mark_changed(&self, changed: &mut bool) {
+        *changed = true;
+    }
+
+    pub fn ensure_all_columns(&mut self) {
+        for column in TableColumn::ALL {
+            if !self.columns.iter().any(|pref| pref.column == column) {
+                self.columns.push(ColumnPrefs {
+                    column,
+                    width: column.default_width(),
+                });
+            }
+        }
+    }
+
+    pub fn move_column_left(&mut self, column: TableColumn) {
+        if let Some(index) = self.columns.iter().position(|pref| pref.column == column)
+            && index > 0
+        {
+            self.columns.swap(index - 1, index);
+        }
+    }
+
+    pub fn move_column_right(&mut self, column: TableColumn) {
+        if let Some(index) = self.columns.iter().position(|pref| pref.column == column)
+            && index + 1 < self.columns.len()
+        {
+            self.columns.swap(index, index + 1);
+        }
+    }
+}
+
+fn parse_columns(value: &str) -> Vec<ColumnPrefs> {
+    value
+        .split(',')
+        .filter_map(|part| {
+            let (column, width) = part.trim().split_once(':')?;
+            let column = TableColumn::parse(column)?;
+            let width = width.parse().unwrap_or_else(|_| column.default_width());
+            Some(ColumnPrefs { column, width })
+        })
+        .collect()
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("MacDirStat")
+            .join("settings.txt"),
+    )
+}

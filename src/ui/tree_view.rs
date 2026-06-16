@@ -1,20 +1,21 @@
-use std::cell::Cell;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use egui::{Color32, Id, Rect, RichText, pos2, vec2};
+use egui::{Color32, Id, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::format_size;
-use crate::model::tree::{FileNode, TreePath};
+use crate::model::tree::{FileNode, FileTree, NodeId};
+use crate::settings::{AppPrefs, TableColumn};
+use crate::ui::{ActivePane, NodeCommand};
 
-const MAX_RENDERED_ITEMS: usize = 2000;
-const SIZE_COL_WIDTH: f32 = 55.0;
-const SIZE_COL_MARGIN: f32 = 8.0;
-const FADE_WIDTH: f32 = 30.0;
+const HEADER_H: f32 = 24.0;
+const ROW_H: f32 = 22.0;
+const RESIZE_W: f32 = 5.0;
 
-/// macOS Finder-style folder icon colors.
 const FOLDER_BODY: Color32 = Color32::from_rgb(86, 182, 249);
 const FOLDER_TAB: Color32 = Color32::from_rgb(64, 152, 226);
 
-/// Render the "MacDirStat" branding with "Dir" in blue.
 pub fn show_branding(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -29,370 +30,548 @@ pub fn show_branding(ui: &mut egui::Ui) {
     });
 }
 
-pub fn show(ui: &mut egui::Ui, root: &FileNode, selected: &mut Option<TreePath>) {
+pub fn show(
+    ui: &mut egui::Ui,
+    tree: &FileTree,
+    selected: &mut Option<NodeId>,
+    hovered: &mut Option<NodeId>,
+    expanded: &mut BTreeSet<NodeId>,
+    active_pane: &mut ActivePane,
+    prefs: &mut AppPrefs,
+    prefs_changed: &mut bool,
+) -> Option<NodeCommand> {
     show_branding(ui);
     ui.add_space(4.0);
 
-    // Expand ancestors and scroll only when selection changes (not every frame,
-    // otherwise the user can never manually collapse ancestor nodes).
-    let last_expanded_id = Id::new("tree_last_expanded");
-    let last_expanded: Option<Vec<usize>> = ui.ctx().data_mut(|d| d.get_temp(last_expanded_id));
-    let selection_changed = selected.as_ref() != last_expanded.as_ref();
-    if selection_changed {
-        if let Some(sel_path) = selected.as_ref() {
-            expand_to_path(ui.ctx(), sel_path);
-        }
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(last_expanded_id, selected.clone()));
-    }
+    expanded.insert(tree.root.id);
 
-    // Rounded-corner container for the tree (Finder/System Settings style)
     let frame_fill = if ui.visuals().dark_mode {
         Color32::from_rgb(38, 38, 38)
     } else {
         Color32::from_rgb(236, 236, 236)
     };
+    let alt_row_color = if ui.visuals().dark_mode {
+        Color32::from_rgb(46, 46, 46)
+    } else {
+        Color32::from_rgb(226, 226, 226)
+    };
+
+    let mut command = None;
+    let mut rows = Vec::new();
+    collect_rows(&tree.root, None, 0, &[], expanded, prefs, &mut rows);
+
+    let arrow_command = handle_keyboard(ui.ctx(), tree, selected, expanded, active_pane, &rows);
+    if command.is_none() {
+        command = arrow_command;
+    }
+
     let frame = egui::Frame::new()
         .fill(frame_fill)
         .corner_radius(8.0)
         .inner_margin(4.0);
-
-    // Derive alternating row color from the frame's fill
-    let alt_row_color = if ui.visuals().dark_mode {
-        Color32::from_rgb(
-            frame_fill.r().saturating_add(8),
-            frame_fill.g().saturating_add(8),
-            frame_fill.b().saturating_add(8),
-        )
-    } else {
-        Color32::from_rgb(
-            frame_fill.r().saturating_sub(10),
-            frame_fill.g().saturating_sub(10),
-            frame_fill.b().saturating_sub(10),
-        )
-    };
-
-    let mut ctx = TreeCtx {
-        selected,
-        current_path: Vec::new(),
-        rendered: 0,
-        visible_paths: Vec::new(),
-        row_index: 0,
-        panel_fill: frame_fill,
-        alt_row_color,
-        scroll_right: 0.0,
-        frame_left: 0.0,
-    };
-
-    let available_height = ui.available_height();
     frame.show(ui, |ui| {
-        ui.set_min_height(available_height - frame.total_margin().sum().y);
-        ctx.frame_left = ui.max_rect().left();
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                ctx.scroll_right = ui.max_rect().right();
-                ctx.show_node(ui, root, 0);
+                show_header(ui, prefs, prefs_changed);
+                for (row_index, row) in rows.iter().enumerate() {
+                    if let Some(cmd) = show_row(
+                        ui,
+                        tree,
+                        row,
+                        row_index,
+                        selected,
+                        hovered,
+                        expanded,
+                        active_pane,
+                        prefs,
+                        frame_fill,
+                        alt_row_color,
+                    ) {
+                        command = Some(cmd);
+                    }
+                }
             });
     });
 
-    // Handle Up/Down arrow keys for navigation
-    if !ctx.visible_paths.is_empty() {
-        let arrow = ui.ctx().input(|i| {
-            if i.key_pressed(egui::Key::ArrowDown) {
-                Some(1i32)
-            } else if i.key_pressed(egui::Key::ArrowUp) {
-                Some(-1i32)
-            } else {
-                None
-            }
-        });
+    command
+}
 
-        if let Some(direction) = arrow {
-            let selected = &mut ctx.selected;
-            if let Some(sel) = selected.as_ref() {
-                if let Some(pos) = ctx.visible_paths.iter().position(|p| p == sel) {
-                    let new_pos = pos as i32 + direction;
-                    if new_pos >= 0 && (new_pos as usize) < ctx.visible_paths.len() {
-                        **selected = Some(ctx.visible_paths[new_pos as usize].clone());
-                    }
+fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for index in 0..prefs.columns.len() {
+            let column = prefs.columns[index].column;
+            let width = prefs.columns[index].width;
+            let (rect, response) = ui.allocate_exact_size(vec2(width, HEADER_H), Sense::click());
+            let fill = ui.visuals().widgets.inactive.bg_fill;
+            ui.painter().rect_filled(rect, 0.0, fill);
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+
+            let sort = if prefs.sort_column == column {
+                if prefs.sort_descending {
+                    " ▼"
                 } else {
-                    **selected = Some(ctx.visible_paths[0].clone());
+                    " ▲"
                 }
             } else {
-                **selected = Some(ctx.visible_paths[0].clone());
-            }
-        }
-    }
-}
-
-/// Open all ancestor CollapsingState headers for the given path
-/// so the selected node becomes visible in the tree.
-fn expand_to_path(ctx: &egui::Context, path: &[usize]) {
-    for depth in 0..path.len() {
-        let prefix = &path[..depth];
-        let id = Id::new(("tree", prefix));
-        let mut state =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ctx, id, false);
-        state.set_open(true);
-        state.store(ctx);
-    }
-}
-
-struct TreeCtx<'a> {
-    selected: &'a mut Option<Vec<usize>>,
-    current_path: Vec<usize>,
-    rendered: usize,
-    visible_paths: Vec<TreePath>,
-    row_index: usize,
-    panel_fill: Color32,
-    alt_row_color: Color32,
-    scroll_right: f32,
-    frame_left: f32,
-}
-
-impl<'a> TreeCtx<'a> {
-    /// Paint full-width row background at current cursor position.
-    /// Paints every row (panel_fill for even, alt color for odd) to ensure
-    /// a uniform background with no gaps between labels and the size column.
-    /// When `is_selected`, also paints the blue selection highlight.
-    /// Constrained to the frame bounds so backgrounds don't bleed past rounded corners.
-    fn paint_row_bg(&mut self, ui: &mut egui::Ui, is_selected: bool) {
-        let y = ui.cursor().min.y;
-        let bg = if self.row_index % 2 == 1 {
-            self.alt_row_color
-        } else {
-            self.panel_fill
-        };
-        let width = self.scroll_right - self.frame_left;
-        let bg_rect = Rect::from_min_size(pos2(self.frame_left, y), vec2(width, 20.0));
-        ui.painter().rect_filled(bg_rect, 0.0, bg);
-        if is_selected {
-            let sel_color = ui.visuals().selection.bg_fill;
-            ui.painter().rect_filled(bg_rect, 0.0, sel_color);
-        }
-        self.row_index += 1;
-    }
-
-    /// Paint the size text at the right edge. Bold+black when selected.
-    /// No background overlay — name text fading is handled at render time
-    /// via foreground alpha (see `paint_name_faded`).
-    fn paint_size(&self, ui: &egui::Ui, y_center: f32, size: u64, is_selected: bool) {
-        let size_str = format_size(size);
-        let color = if is_selected {
-            Color32::BLACK
-        } else {
-            Color32::from_rgb(140, 140, 140)
-        };
-        let anchor = pos2(self.scroll_right - SIZE_COL_MARGIN, y_center);
-        ui.painter().text(
-            anchor,
-            egui::Align2::RIGHT_CENTER,
-            &size_str,
-            egui::FontId::proportional(11.0),
-            color,
-        );
-        if is_selected {
+                ""
+            };
             ui.painter().text(
-                anchor + vec2(0.5, 0.0),
-                egui::Align2::RIGHT_CENTER,
-                &size_str,
-                egui::FontId::proportional(11.0),
-                color,
-            );
-        }
-    }
-
-    /// Paint the name text with a foreground fade near the size column.
-    /// Uses clipped painters to draw text strips with decreasing alpha,
-    /// so the text fades out without any background overlay.
-    fn paint_name_faded(&self, ui: &egui::Ui, pos: egui::Pos2, name: &str, is_selected: bool) {
-        let base_color = if is_selected {
-            Color32::WHITE
-        } else {
-            ui.visuals().text_color()
-        };
-
-        let size_area_left = self.scroll_right - SIZE_COL_MARGIN - SIZE_COL_WIDTH;
-        let fade_left = size_area_left - FADE_WIDTH;
-        let clip = ui.clip_rect();
-        let bold_offset = vec2(0.5, 0.0);
-
-        // Helper: paint text (with optional bold double-draw) using given painter and color
-        let draw = |painter: &egui::Painter, color: Color32| {
-            painter.text(
-                pos,
+                pos2(rect.left() + 6.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                name,
-                egui::FontId::proportional(14.0),
-                color,
-            );
-            if is_selected {
-                painter.text(
-                    pos + bold_offset,
-                    egui::Align2::LEFT_CENTER,
-                    name,
-                    egui::FontId::proportional(14.0),
-                    color,
-                );
-            }
-        };
-
-        // Full-opacity region: from left edge to start of fade
-        let full_clip = Rect::from_min_max(
-            pos2(clip.left(), clip.top()),
-            pos2(fade_left, clip.bottom()),
-        );
-        draw(&ui.painter().with_clip_rect(full_clip), base_color);
-
-        // Fade region: multiple strips with decreasing alpha
-        let steps: u32 = 8;
-        let step_w = FADE_WIDTH / steps as f32;
-        for i in 0..steps {
-            let t = 1.0 - (i + 1) as f32 / steps as f32;
-            let alpha = (t * base_color.a() as f32) as u8;
-            let faded = Color32::from_rgba_unmultiplied(
-                base_color.r(),
-                base_color.g(),
-                base_color.b(),
-                alpha,
-            );
-            let strip_left = fade_left + i as f32 * step_w;
-            let strip_clip = Rect::from_min_max(
-                pos2(strip_left, clip.top()),
-                pos2(strip_left + step_w, clip.bottom()),
-            );
-            draw(&ui.painter().with_clip_rect(strip_clip), faded);
-        }
-    }
-
-    fn show_node(&mut self, ui: &mut egui::Ui, node: &FileNode, depth: usize) {
-        if self.rendered >= MAX_RENDERED_ITEMS {
-            return;
-        }
-        self.rendered += 1;
-
-        let is_selected = self.selected.as_ref() == Some(&self.current_path);
-
-        // Record this path as visible for arrow key navigation
-        self.visible_paths.push(self.current_path.clone());
-
-        // Show short name for root node (last path segment), full name otherwise
-        let display_name = if depth == 0 {
-            node.name.rsplit('/').next().unwrap_or(&node.name)
-        } else {
-            &node.name
-        };
-
-        let y_before = ui.cursor().min.y;
-
-        if node.is_dir && !node.children.is_empty() {
-            let id = Id::new(("tree", self.current_path.as_slice()));
-            let default_open = depth < 1;
-
-            let state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                id,
-                default_open,
+                format!("{}{}", column.title(), sort),
+                egui::FontId::proportional(12.0),
+                ui.visuals().text_color(),
             );
 
-            self.paint_row_bg(ui, is_selected);
-
-            let header_row_y = y_before;
-            let path_clone = self.current_path.clone();
-            let is_sel = is_selected;
-            let name_owned = display_name.to_string();
-            let name_x = Cell::new(0.0f32);
-
-            state
-                .show_header(ui, |ui| {
-                    // Allocate space for folder icon and paint it
-                    let (icon_rect, _) =
-                        ui.allocate_exact_size(vec2(18.0, 14.0), egui::Sense::hover());
-                    paint_folder_icon(ui.painter(), icon_rect);
-
-                    // Record x position right after the icon
-                    name_x.set(icon_rect.right() + 4.0);
-
-                    // Allocate remaining width as click area
-                    let avail = ui.available_size();
-                    let (_, resp) = ui.allocate_exact_size(avail, egui::Sense::click());
-                    if resp.clicked() {
-                        *self.selected = Some(path_clone.clone());
-                    }
-                })
-                .body(|ui| {
-                    let remaining = node.children.len();
-                    for (i, child) in node.children.iter().enumerate() {
-                        if self.rendered >= MAX_RENDERED_ITEMS {
-                            let skipped = remaining - i;
-                            ui.label(format!("... and {} more items", skipped));
-                            break;
-                        }
-                        self.current_path.push(i);
-                        self.show_node(ui, child, depth + 1);
-                        self.current_path.pop();
-                    }
-                });
-
-            // Paint name with foreground fade and size for header row
-            self.paint_name_faded(
-                ui,
-                pos2(name_x.get(), header_row_y + 10.0),
-                &name_owned,
-                is_sel,
-            );
-            self.paint_size(ui, header_row_y + 10.0, node.size, is_sel);
-        } else {
-            self.paint_row_bg(ui, is_selected);
-
-            let name_x = Cell::new(0.0f32);
-
-            ui.horizontal(|ui| {
-                ui.add_space(4.0);
-
-                // Folder icon for empty directories
-                if node.is_dir {
-                    let (icon_rect, _) =
-                        ui.allocate_exact_size(vec2(18.0, 14.0), egui::Sense::hover());
-                    paint_folder_icon(ui.painter(), icon_rect);
-                    name_x.set(icon_rect.right() + 4.0);
+            if response.clicked() {
+                if prefs.sort_column == column {
+                    prefs.sort_descending = !prefs.sort_descending;
                 } else {
-                    name_x.set(ui.cursor().min.x);
+                    prefs.sort_column = column;
+                    prefs.sort_descending = column != TableColumn::Name;
                 }
+                prefs.mark_changed(prefs_changed);
+            }
 
-                // Allocate remaining width as click area
-                let avail = ui.available_size();
-                let (_, resp) = ui.allocate_exact_size(avail, egui::Sense::click());
-                if resp.clicked() {
-                    *self.selected = Some(self.current_path.clone());
+            response.context_menu(|ui| {
+                if ui.button("Move Column Left").clicked() {
+                    prefs.move_column_left(column);
+                    prefs.mark_changed(prefs_changed);
+                    ui.close_menu();
+                }
+                if ui.button("Move Column Right").clicked() {
+                    prefs.move_column_right(column);
+                    prefs.mark_changed(prefs_changed);
+                    ui.close_menu();
                 }
             });
 
-            // Paint name with foreground fade and size
-            self.paint_name_faded(
-                ui,
-                pos2(name_x.get(), y_before + 10.0),
-                display_name,
-                is_selected,
+            let (resize_rect, resize_resp) =
+                ui.allocate_exact_size(vec2(RESIZE_W, HEADER_H), Sense::drag());
+            ui.painter().line_segment(
+                [
+                    pos2(resize_rect.center().x, resize_rect.top() + 3.0),
+                    pos2(resize_rect.center().x, resize_rect.bottom() - 3.0),
+                ],
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
             );
-            self.paint_size(ui, y_before + 10.0, node.size, is_selected);
+            if resize_resp.dragged() {
+                let delta_x = ui.input(|i| i.pointer.delta().x);
+                prefs.columns[index].width =
+                    (prefs.columns[index].width + delta_x).clamp(48.0, 480.0);
+                prefs.mark_changed(prefs_changed);
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_row(
+    ui: &mut egui::Ui,
+    tree: &FileTree,
+    row: &RowInfo,
+    row_index: usize,
+    selected: &mut Option<NodeId>,
+    hovered: &mut Option<NodeId>,
+    expanded: &mut BTreeSet<NodeId>,
+    active_pane: &mut ActivePane,
+    prefs: &AppPrefs,
+    frame_fill: Color32,
+    alt_row_color: Color32,
+) -> Option<NodeCommand> {
+    let mut command = None;
+    let is_selected = *selected == Some(row.id);
+    let bg = if is_selected {
+        ui.visuals().selection.bg_fill
+    } else if row_index % 2 == 1 {
+        alt_row_color
+    } else {
+        frame_fill
+    };
+
+    let total_w = prefs
+        .columns
+        .iter()
+        .map(|pref| pref.width + RESIZE_W)
+        .sum::<f32>();
+    let row_start = ui.cursor().min;
+    let row_rect = Rect::from_min_size(row_start, vec2(total_w, ROW_H));
+    ui.painter().rect_filled(row_rect, 0.0, bg);
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for pref in &prefs.columns {
+            let (rect, resp) = ui.allocate_exact_size(vec2(pref.width, ROW_H), Sense::click());
+            let cell_resp = resp;
+            if cell_resp.hovered() {
+                *hovered = Some(row.id);
+            }
+            if cell_resp.clicked() {
+                *selected = Some(row.id);
+                *active_pane = ActivePane::Table;
+            }
+            if cell_resp.double_clicked() {
+                command = Some(NodeCommand::Open(row.id));
+            }
+            cell_resp.context_menu(|ui| {
+                *selected = Some(row.id);
+                *active_pane = ActivePane::Table;
+                node_context_menu(ui, row.id, &mut command);
+            });
+            paint_cell(ui, rect, tree, row, pref.column, expanded, is_selected);
+            ui.allocate_exact_size(vec2(RESIZE_W, ROW_H), Sense::hover());
+        }
+    });
+    command
+}
+
+fn paint_cell(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    tree: &FileTree,
+    row: &RowInfo,
+    column: TableColumn,
+    expanded: &mut BTreeSet<NodeId>,
+    is_selected: bool,
+) {
+    let text_color = if is_selected {
+        Color32::WHITE
+    } else {
+        ui.visuals().text_color()
+    };
+    match column {
+        TableColumn::Name => {
+            let mut x = rect.left() + 4.0 + row.depth as f32 * 14.0;
+            if row.is_dir && row.has_children {
+                let arrow_rect = Rect::from_min_size(pos2(x, rect.top() + 3.0), vec2(14.0, 16.0));
+                let arrow_resp =
+                    ui.interact(arrow_rect, Id::new(("expand", row.id)), Sense::click());
+                if arrow_resp.clicked() {
+                    if expanded.contains(&row.id) {
+                        expanded.remove(&row.id);
+                    } else {
+                        expanded.insert(row.id);
+                    }
+                }
+                let glyph = if expanded.contains(&row.id) {
+                    "▾"
+                } else {
+                    "▸"
+                };
+                ui.painter().text(
+                    arrow_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    egui::FontId::proportional(13.0),
+                    text_color,
+                );
+            }
+            x += 16.0;
+            if row.is_dir {
+                let icon_rect = Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(18.0, 14.0));
+                paint_folder_icon(ui.painter(), icon_rect);
+                x = icon_rect.right() + 5.0;
+            }
+            ui.painter().text(
+                pos2(x, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                row.display_name.as_str(),
+                egui::FontId::proportional(13.0),
+                text_color,
+            );
+        }
+        TableColumn::Size => paint_right(ui, rect, &format_size(row.size), text_color),
+        TableColumn::PercentOfParent => {
+            let pct = if let Some(parent_size) = row.parent_size {
+                if parent_size > 0 {
+                    format!("{:.1}%", row.size as f64 * 100.0 / parent_size as f64)
+                } else {
+                    String::new()
+                }
+            } else {
+                "100.0%".to_owned()
+            };
+            paint_right(ui, rect, &pct, text_color);
+        }
+        TableColumn::Items => paint_right(
+            ui,
+            rect,
+            &format_count(row.file_count + row.dir_count),
+            text_color,
+        ),
+        TableColumn::Files => paint_right(ui, rect, &format_count(row.file_count), text_color),
+        TableColumn::Folders => paint_right(ui, rect, &format_count(row.dir_count), text_color),
+        TableColumn::Modified => {
+            let text = tree
+                .root
+                .resolve_id(row.id)
+                .and_then(|node| node.modified)
+                .map(format_modified)
+                .unwrap_or_default();
+            ui.painter().text(
+                pos2(rect.left() + 6.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                text,
+                egui::FontId::proportional(12.0),
+                text_color,
+            );
         }
     }
 }
 
-/// Paint a macOS Finder-style blue folder icon into the given rect.
+fn paint_right(ui: &egui::Ui, rect: Rect, text: &str, color: Color32) {
+    ui.painter().text(
+        pos2(rect.right() - 6.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        egui::FontId::proportional(12.0),
+        color,
+    );
+}
+
+fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCommand>) {
+    if ui.button("Open").clicked() {
+        *command = Some(NodeCommand::Open(id));
+        ui.close_menu();
+    }
+    if ui.button("Reveal in Finder").clicked() {
+        *command = Some(NodeCommand::Reveal(id));
+        ui.close_menu();
+    }
+    if ui.button("Copy Path").clicked() {
+        *command = Some(NodeCommand::CopyPath(id));
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Delete").clicked() {
+        *command = Some(NodeCommand::Delete { id, confirm: true });
+        ui.close_menu();
+    }
+}
+
+fn handle_keyboard(
+    ctx: &egui::Context,
+    tree: &FileTree,
+    selected: &mut Option<NodeId>,
+    expanded: &mut BTreeSet<NodeId>,
+    active_pane: &mut ActivePane,
+    rows: &[RowInfo],
+) -> Option<NodeCommand> {
+    if *active_pane != ActivePane::Table {
+        return None;
+    }
+    if rows.is_empty() {
+        return None;
+    }
+
+    let command = ctx.input(|i| {
+        if i.key_pressed(egui::Key::Enter) {
+            selected.map(NodeCommand::Open)
+        } else {
+            None
+        }
+    });
+    if command.is_some() {
+        return command;
+    }
+
+    let key = ctx.input(|i| {
+        if i.key_pressed(egui::Key::ArrowDown) {
+            Some(egui::Key::ArrowDown)
+        } else if i.key_pressed(egui::Key::ArrowUp) {
+            Some(egui::Key::ArrowUp)
+        } else if i.key_pressed(egui::Key::Home) {
+            Some(egui::Key::Home)
+        } else if i.key_pressed(egui::Key::End) {
+            Some(egui::Key::End)
+        } else if i.key_pressed(egui::Key::ArrowLeft) {
+            Some(egui::Key::ArrowLeft)
+        } else if i.key_pressed(egui::Key::ArrowRight) {
+            Some(egui::Key::ArrowRight)
+        } else {
+            None
+        }
+    });
+
+    let Some(key) = key else {
+        return None;
+    };
+    let current = selected
+        .and_then(|id| rows.iter().position(|row| row.id == id))
+        .unwrap_or(0);
+    match key {
+        egui::Key::ArrowDown => {
+            *selected = Some(rows[(current + 1).min(rows.len() - 1)].id);
+        }
+        egui::Key::ArrowUp => {
+            *selected = Some(rows[current.saturating_sub(1)].id);
+        }
+        egui::Key::Home => {
+            *selected = Some(rows[0].id);
+        }
+        egui::Key::End => {
+            *selected = Some(rows[rows.len() - 1].id);
+        }
+        egui::Key::ArrowRight => {
+            if let Some(id) = *selected
+                && let Some(node) = tree.root.resolve_id(id)
+                && node.is_dir
+                && !node.children.is_empty()
+            {
+                expanded.insert(id);
+            }
+        }
+        egui::Key::ArrowLeft => {
+            if let Some(id) = *selected {
+                if expanded.remove(&id) {
+                    return None;
+                }
+                if let Some(path) = tree.root.path_to_id(id)
+                    && let Some(parent_path) = path.split_last().map(|(_, parent)| parent)
+                    && let Some(parent) = tree.root.resolve_path(parent_path)
+                {
+                    *selected = Some(parent.id);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+struct RowInfo {
+    id: NodeId,
+    display_name: String,
+    size: u64,
+    file_count: u64,
+    dir_count: u64,
+    is_dir: bool,
+    has_children: bool,
+    depth: usize,
+    parent_size: Option<u64>,
+}
+
+fn collect_rows(
+    node: &FileNode,
+    parent_size: Option<u64>,
+    depth: usize,
+    path: &[usize],
+    expanded: &BTreeSet<NodeId>,
+    prefs: &AppPrefs,
+    rows: &mut Vec<RowInfo>,
+) {
+    let display_name = if depth == 0 {
+        node.name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node.name)
+            .to_owned()
+    } else {
+        node.name.to_string()
+    };
+    rows.push(RowInfo {
+        id: node.id,
+        display_name,
+        size: node.size,
+        file_count: node.file_count,
+        dir_count: node.dir_count,
+        is_dir: node.is_dir,
+        has_children: !node.children.is_empty(),
+        depth,
+        parent_size,
+    });
+
+    if !expanded.contains(&node.id) {
+        return;
+    }
+
+    let mut child_indices = (0..node.children.len()).collect::<Vec<_>>();
+    child_indices.sort_by(|&a, &b| compare_nodes(&node.children[a], &node.children[b], prefs));
+    for child_index in child_indices {
+        let mut child_path = path.to_vec();
+        child_path.push(child_index);
+        collect_rows(
+            &node.children[child_index],
+            Some(node.size),
+            depth + 1,
+            &child_path,
+            expanded,
+            prefs,
+            rows,
+        );
+    }
+}
+
+fn compare_nodes(a: &FileNode, b: &FileNode, prefs: &AppPrefs) -> Ordering {
+    let ord = match prefs.sort_column {
+        TableColumn::Name => natural_name_cmp(&a.name, &b.name),
+        TableColumn::Size | TableColumn::PercentOfParent => a.size.cmp(&b.size),
+        TableColumn::Items => (a.file_count + a.dir_count).cmp(&(b.file_count + b.dir_count)),
+        TableColumn::Files => a.file_count.cmp(&b.file_count),
+        TableColumn::Folders => a.dir_count.cmp(&b.dir_count),
+        TableColumn::Modified => a.modified.cmp(&b.modified),
+    };
+    let ord = if prefs.sort_descending {
+        ord.reverse()
+    } else {
+        ord
+    };
+    ord.then_with(|| natural_name_cmp(&a.name, &b.name))
+}
+
+fn natural_name_cmp(a: &str, b: &str) -> Ordering {
+    a.to_lowercase().cmp(&b.to_lowercase())
+}
+
+fn format_count(count: u64) -> String {
+    let s = count.to_string();
+    let mut result = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result.chars().rev().collect()
+}
+
+fn format_modified(time: SystemTime) -> String {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return String::new();
+    };
+    let secs = duration.as_secs() as libc::time_t;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let ptr = unsafe { libc::localtime_r(&secs, tm.as_mut_ptr()) };
+    if ptr.is_null() {
+        return String::new();
+    }
+    let tm = unsafe { tm.assume_init() };
+    let mut buf = [0i8; 32];
+    let fmt = c"%Y-%m-%d %H:%M";
+    let written = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &tm) };
+    if written == 0 {
+        return String::new();
+    }
+    let bytes = &buf[..written];
+    String::from_utf8_lossy(&bytes.iter().map(|&b| b as u8).collect::<Vec<_>>()).into_owned()
+}
+
 fn paint_folder_icon(painter: &egui::Painter, rect: Rect) {
     let x = rect.min.x;
     let y = rect.min.y;
     let w = rect.width();
     let h = rect.height();
 
-    // Tab (top-left notch)
     let tab = Rect::from_min_size(pos2(x, y + 0.5), vec2(w * 0.42, h * 0.28));
     painter.rect_filled(tab, 1.5, FOLDER_TAB);
 
-    // Body (main folder rectangle)
     let body = Rect::from_min_size(pos2(x, y + h * 0.22), vec2(w, h * 0.78));
     painter.rect_filled(body, 2.0, FOLDER_BODY);
 }
