@@ -27,6 +27,30 @@ pub(crate) unsafe fn send2_void(obj: Id, sel: Sel, a: Id, b: Id) {
     unsafe { f(obj, sel, a, b) }
 }
 
+pub(crate) unsafe fn send0_void(obj: Id, sel: Sel) {
+    let f: unsafe extern "C" fn(Id, Sel) =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { f(obj, sel) }
+}
+
+pub(crate) unsafe fn send0_usize(obj: Id, sel: Sel) -> usize {
+    let f: unsafe extern "C" fn(Id, Sel) -> usize =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { f(obj, sel) }
+}
+
+pub(crate) unsafe fn send0_ptr<T>(obj: Id, sel: Sel) -> *const T {
+    let f: unsafe extern "C" fn(Id, Sel) -> *const T =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { f(obj, sel) }
+}
+
+pub(crate) unsafe fn send2_isize_id(obj: Id, sel: Sel, a: isize, b: Id) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, isize, Id) -> Id =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { f(obj, sel, a, b) }
+}
+
 pub(crate) unsafe fn nsstring(s: &str) -> Id {
     let cls = unsafe { objc_getClass(c"NSString".as_ptr()) };
     let cstr = std::ffi::CString::new(s)

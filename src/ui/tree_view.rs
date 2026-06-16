@@ -7,14 +7,12 @@ use egui::{Color32, Id, Rect, RichText, Sense, Stroke, pos2, vec2};
 use crate::format_size;
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::{AppPrefs, TableColumn};
+use crate::ui::file_icons::{self, FileIconCache};
 use crate::ui::{ActivePane, NodeCommand};
 
 const HEADER_H: f32 = 24.0;
 const ROW_H: f32 = 22.0;
 const RESIZE_W: f32 = 5.0;
-
-const FOLDER_BODY: Color32 = Color32::from_rgb(86, 182, 249);
-const FOLDER_TAB: Color32 = Color32::from_rgb(64, 152, 226);
 
 pub fn show_branding(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -41,6 +39,7 @@ pub fn show(
     active_pane: &mut ActivePane,
     prefs: &mut AppPrefs,
     prefs_changed: &mut bool,
+    file_icons: &mut FileIconCache,
 ) -> Option<NodeCommand> {
     show_branding(ui);
     ui.add_space(4.0);
@@ -89,6 +88,7 @@ pub fn show(
                         deleted_outlines,
                         active_pane,
                         prefs,
+                        file_icons,
                         frame_fill,
                         alt_row_color,
                     ) {
@@ -189,6 +189,7 @@ fn show_row(
     deleted_outlines: &BTreeSet<NodeId>,
     active_pane: &mut ActivePane,
     prefs: &AppPrefs,
+    file_icons: &mut FileIconCache,
     frame_fill: Color32,
     alt_row_color: Color32,
 ) -> Option<NodeCommand> {
@@ -241,6 +242,7 @@ fn show_row(
                 expanded,
                 is_selected,
                 is_deleted,
+                file_icons,
             );
             ui.allocate_exact_size(vec2(RESIZE_W, ROW_H), Sense::hover());
         }
@@ -257,6 +259,7 @@ fn paint_cell(
     expanded: &mut BTreeSet<NodeId>,
     is_selected: bool,
     is_deleted: bool,
+    file_icons: &mut FileIconCache,
 ) {
     let text_color = if is_deleted {
         Color32::from_rgb(230, 45, 45)
@@ -296,11 +299,23 @@ fn paint_cell(
                 );
             }
             x += 16.0;
-            if row.is_dir {
-                let icon_rect = Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(18.0, 14.0));
-                paint_folder_icon(ui.painter(), icon_rect);
-                x = icon_rect.right() + 5.0;
+            let icon_rect =
+                Rect::from_center_size(pos2(x + 8.0, rect.center().y), vec2(16.0, 16.0));
+            if let Some(texture) =
+                file_icons.texture_for(ui.ctx(), row.is_dir, row.display_name.as_str())
+            {
+                ui.painter().image(
+                    texture.id(),
+                    icon_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            } else if row.is_dir {
+                file_icons::paint_fallback_folder_icon(ui.painter(), icon_rect);
+            } else {
+                file_icons::paint_fallback_file_icon(ui.painter(), icon_rect);
             }
+            x = icon_rect.right() + 5.0;
             paint_text(
                 ui,
                 rect,
@@ -669,17 +684,4 @@ fn format_modified(time: SystemTime) -> String {
     }
     let bytes = &buf[..written];
     String::from_utf8_lossy(&bytes.iter().map(|&b| b as u8).collect::<Vec<_>>()).into_owned()
-}
-
-fn paint_folder_icon(painter: &egui::Painter, rect: Rect) {
-    let x = rect.min.x;
-    let y = rect.min.y;
-    let w = rect.width();
-    let h = rect.height();
-
-    let tab = Rect::from_min_size(pos2(x, y + 0.5), vec2(w * 0.42, h * 0.28));
-    painter.rect_filled(tab, 1.5, FOLDER_TAB);
-
-    let body = Rect::from_min_size(pos2(x, y + h * 0.22), vec2(w, h * 0.78));
-    painter.rect_filled(body, 2.0, FOLDER_BODY);
 }

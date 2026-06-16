@@ -8,6 +8,7 @@ use crate::format_size;
 use crate::model::color::ColorMap;
 use crate::model::tree::{FileTree, NodeId};
 use crate::settings::{AppPrefs, SplitOrientation};
+use crate::ui::file_icons::FileIconCache;
 use crate::ui::{self, ActivePane, NodeCommand};
 
 pub struct App {
@@ -40,6 +41,7 @@ struct LoadedState {
     cached_layout_rect: Option<egui::Rect>,
     treemap_texture: Option<egui::TextureHandle>,
     pending_scan: Option<PathBuf>,
+    file_icons: FileIconCache,
 }
 
 impl App {
@@ -131,6 +133,7 @@ impl eframe::App for App {
                 cached_layout_rect: None,
                 treemap_texture: None,
                 pending_scan: None,
+                file_icons: FileIconCache::default(),
             }));
         }
 
@@ -384,6 +387,7 @@ impl LoadedState {
             &mut self.active_pane,
             prefs,
             prefs_changed,
+            &mut self.file_icons,
         )
     }
 
