@@ -6,7 +6,7 @@ use eframe::egui;
 
 use crate::format_size;
 use crate::model::color::ColorMap;
-use crate::model::tree::{FileTree, NodeId, TreePath};
+use crate::model::tree::{FileTree, NodeId};
 use crate::settings::{AppPrefs, SplitOrientation};
 use crate::ui::{self, ActivePane, NodeCommand};
 
@@ -30,6 +30,8 @@ struct LoadedState {
     selected: Option<NodeId>,
     hovered: Option<NodeId>,
     expanded: BTreeSet<NodeId>,
+    deleted_nodes: BTreeSet<NodeId>,
+    deleted_outlines: BTreeSet<NodeId>,
     active_pane: ActivePane,
     status_message: Option<String>,
     scan_time_ms: f64,
@@ -116,6 +118,8 @@ impl eframe::App for App {
                 selected: None,
                 hovered: None,
                 expanded,
+                deleted_nodes: BTreeSet::new(),
+                deleted_outlines: BTreeSet::new(),
                 active_pane: ActivePane::Table,
                 status_message: None,
                 scan_time_ms,
@@ -290,6 +294,8 @@ impl LoadedState {
                     {
                         prefs.treemap_folder_depth = folder_depth as usize;
                         prefs.mark_changed(prefs_changed);
+                        self.cached_layout_rect = None;
+                        self.treemap_texture = None;
                     }
                 });
             });
@@ -360,6 +366,8 @@ impl LoadedState {
             &mut self.selected,
             &mut self.hovered,
             &mut self.expanded,
+            &self.deleted_nodes,
+            &self.deleted_outlines,
             &mut self.active_pane,
             prefs,
             prefs_changed,
@@ -374,6 +382,8 @@ impl LoadedState {
             &mut self.hovered,
             &mut self.active_pane,
             &self.color_map,
+            &self.deleted_nodes,
+            &self.deleted_outlines,
             prefs,
             &mut self.cached_layout_rect,
             &mut self.treemap_texture,
@@ -481,12 +491,9 @@ impl LoadedState {
 /// Snapshot of a node's metadata needed for deletion.
 struct DeleteTarget {
     id: NodeId,
-    sel_path: TreePath,
     fs_path: std::path::PathBuf,
     is_dir: bool,
     size: u64,
-    file_count: u64,
-    dir_count: u64,
 }
 
 impl DeleteTarget {
@@ -497,12 +504,9 @@ impl DeleteTarget {
         let node = tree.root.resolve_id(id)?;
         Some(Self {
             id,
-            sel_path,
             fs_path,
             is_dir: node.is_dir,
             size: node.size,
-            file_count: node.file_count,
-            dir_count: node.dir_count,
         })
     }
 
@@ -571,24 +575,33 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
     };
     match result {
         Ok(()) => {
-            loaded.tree.subtract_from_ancestors(
-                &target.sel_path,
-                target.size,
-                target.file_count,
-                target.dir_count,
-            );
-            loaded.tree.remove_at_path(&target.sel_path);
-            loaded.tree.rebuild_extensions();
-            loaded.color_map = ColorMap::from_extensions(&loaded.tree.extensions);
-            loaded.selected = next_selection_after_delete(&loaded.tree.root, &target.sel_path);
+            loaded.deleted_nodes.insert(target.id);
+            if let Some(node) = loaded.tree.root.resolve_id(target.id) {
+                let before = loaded.deleted_outlines.len();
+                collect_deleted_outline_ids(node, &mut loaded.deleted_outlines);
+                if loaded.deleted_outlines.len() == before {
+                    loaded.deleted_outlines.insert(target.id);
+                }
+            }
             loaded.hovered = None;
-            loaded.expanded.remove(&target.id);
-            loaded.cached_layout_rect = None;
-            loaded.treemap_texture = None;
+            loaded.status_message = Some(format!("Deleted {}", target.name()));
         }
         Err(e) => {
             loaded.status_message = Some(format!("Failed to delete {}: {}", target.name(), e));
         }
+    }
+}
+
+fn collect_deleted_outline_ids(
+    node: &crate::model::tree::FileNode,
+    outlines: &mut BTreeSet<NodeId>,
+) {
+    if node.is_dir {
+        for child in node.children.iter() {
+            collect_deleted_outline_ids(child, outlines);
+        }
+    } else {
+        outlines.insert(node.id);
     }
 }
 
@@ -608,34 +621,6 @@ fn show_empty_panes(ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |_ui| {});
-}
-
-/// After deleting the node at `deleted_path`, determine what to select next.
-fn next_selection_after_delete(
-    root: &crate::model::tree::FileNode,
-    deleted_path: &[usize],
-) -> Option<NodeId> {
-    let (&deleted_idx, parent_path) = deleted_path.split_last()?;
-
-    let parent = root.resolve_path(parent_path)?;
-    let child_count = parent.children.len();
-
-    let next_path = if child_count == 0 {
-        if parent_path.is_empty() {
-            None
-        } else {
-            Some(parent_path.to_vec())
-        }
-    } else if deleted_idx < child_count {
-        let mut path = parent_path.to_vec();
-        path.push(deleted_idx);
-        Some(path)
-    } else {
-        let mut path = parent_path.to_vec();
-        path.push(child_count - 1);
-        Some(path)
-    }?;
-    root.resolve_path(&next_path).map(|node| node.id)
 }
 
 fn reveal_in_finder(path: &std::path::Path, loaded: &mut LoadedState) {

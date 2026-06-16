@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
+
 use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2};
-use treemap::{MapItem, Mappable, TreemapLayout};
+use treemap::{Mappable, TreemapLayout};
 
 use crate::format_size;
 use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
@@ -18,13 +20,38 @@ struct CushionLeaf {
     color: Color32,
 }
 
+#[derive(Clone)]
+struct LayoutItem {
+    child_index: usize,
+    size: f64,
+    bounds: treemap::Rect,
+}
+
 const CUSHION_HEIGHT: f64 = 0.38;
 const CUSHION_SCALE: f64 = 0.91;
+const FOLDER_HEADER_H: f64 = 17.0;
+const FOLDER_PAD: f64 = 2.0;
+const MIN_HEADER_W: f64 = 42.0;
+const MIN_HEADER_H: f64 = FOLDER_HEADER_H + FOLDER_PAD * 2.0 + 6.0;
 
 // Lighting parameters (WinDirStat defaults)
 const AMBIENT: f64 = 0.13;
 const DIFFUSE: f64 = 1.0 - AMBIENT;
 const BRIGHTNESS_FACTOR: f64 = 0.88 / PALETTE_BRIGHTNESS;
+
+impl Mappable for LayoutItem {
+    fn size(&self) -> f64 {
+        self.size
+    }
+
+    fn bounds(&self) -> &treemap::Rect {
+        &self.bounds
+    }
+
+    fn set_bounds(&mut self, bounds: treemap::Rect) {
+        self.bounds = bounds;
+    }
+}
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -33,6 +60,8 @@ pub fn show(
     hovered: &mut Option<NodeId>,
     active_pane: &mut ActivePane,
     color_map: &ColorMap,
+    deleted_nodes: &BTreeSet<NodeId>,
+    deleted_outlines: &BTreeSet<NodeId>,
     prefs: &AppPrefs,
     cached_layout_rect: &mut Option<Rect>,
     treemap_texture: &mut Option<TextureHandle>,
@@ -69,8 +98,7 @@ pub fn show(
             h as f64,
         );
 
-        // Layout the tree
-        layout_node(&mut tree.root, bounds);
+        layout_node(&mut tree.root, bounds, 0, prefs);
 
         // Collect cushion leaves
         let mut leaves = Vec::new();
@@ -98,7 +126,9 @@ pub fn show(
         *cached_layout_rect = Some(canvas);
     }
 
-    // Paint the cached texture
+    paint_folder_backgrounds(&painter, &tree.root, 0, prefs);
+
+    // Paint the cached file-cushion texture over transparent folder content.
     if let Some(tex) = treemap_texture {
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         painter.image(tex.id(), canvas, uv, Color32::WHITE);
@@ -164,7 +194,8 @@ pub fn show(
         }
     }
 
-    paint_overlays(&painter, &tree.root, 0, prefs);
+    paint_folder_labels_and_borders(&painter, &tree.root, 0, prefs, deleted_nodes);
+    paint_file_labels(&painter, &tree.root, 0, prefs);
 
     if let Some(hover_id) = *hovered
         && let Some(node) = tree.root.resolve_id(hover_id)
@@ -195,28 +226,80 @@ pub fn show(
         }
     }
 
+    paint_deleted_outlines(&painter, &tree.root, deleted_outlines);
+
     command
 }
 
-fn layout_node(node: &mut FileNode, bounds: treemap::Rect) {
+fn layout_node(node: &mut FileNode, bounds: treemap::Rect, depth: usize, prefs: &AppPrefs) {
     node.rect = bounds;
 
     if node.children.is_empty() || node.size == 0 {
         return;
     }
 
-    let mut items: Vec<MapItem> = node
+    let content = folder_content_rect(&bounds, depth, prefs);
+    if content.w < 1.0 || content.h < 1.0 {
+        return;
+    }
+
+    let mut items: Vec<LayoutItem> = node
         .children
         .iter()
-        .map(|c| MapItem::with_size(c.size as f64))
+        .enumerate()
+        .map(|(child_index, c)| LayoutItem {
+            child_index,
+            size: c.size as f64,
+            bounds: treemap::Rect::new(),
+        })
         .collect();
 
     let layout = TreemapLayout::new();
-    layout.layout_items(&mut items, bounds);
+    layout.layout_items(&mut items, content);
 
-    for (child, item) in node.children.iter_mut().zip(items.iter()) {
+    for item in items.iter() {
         let b: treemap::Rect = *item.bounds();
-        layout_node(child, b);
+        if let Some(child) = node.children.get_mut(item.child_index) {
+            layout_node(child, b, depth + 1, prefs);
+        }
+    }
+}
+
+fn folder_has_chrome(rect: &treemap::Rect, depth: usize, prefs: &AppPrefs) -> bool {
+    depth <= prefs.treemap_folder_depth && rect.w >= MIN_HEADER_W && rect.h >= MIN_HEADER_H
+}
+
+fn folder_header_rect(
+    rect: &treemap::Rect,
+    depth: usize,
+    prefs: &AppPrefs,
+) -> Option<treemap::Rect> {
+    folder_has_chrome(rect, depth, prefs).then_some(treemap::Rect {
+        x: rect.x + FOLDER_PAD,
+        y: rect.y + FOLDER_PAD,
+        w: (rect.w - FOLDER_PAD * 2.0).max(0.0),
+        h: FOLDER_HEADER_H,
+    })
+}
+
+fn folder_content_rect(rect: &treemap::Rect, depth: usize, prefs: &AppPrefs) -> treemap::Rect {
+    if folder_has_chrome(rect, depth, prefs) {
+        let y = rect.y + FOLDER_PAD + FOLDER_HEADER_H + FOLDER_PAD;
+        treemap::Rect {
+            x: rect.x + FOLDER_PAD,
+            y,
+            w: (rect.w - FOLDER_PAD * 2.0).max(0.0),
+            h: (rect.y + rect.h - y - FOLDER_PAD).max(0.0),
+        }
+    } else if depth <= prefs.treemap_folder_depth {
+        treemap::Rect {
+            x: rect.x + 1.0,
+            y: rect.y + 1.0,
+            w: (rect.w - 2.0).max(0.0),
+            h: (rect.h - 2.0).max(0.0),
+        }
+    } else {
+        *rect
     }
 }
 
@@ -247,7 +330,9 @@ fn collect_cushion_leaves(
     }
 
     if node.children.is_empty() {
-        // Leaf node
+        if node.is_dir {
+            return;
+        }
         let color = color_map.get_treemap(node.extension());
         leaves.push(CushionLeaf {
             rect: node.rect,
@@ -263,7 +348,7 @@ fn collect_cushion_leaves(
 }
 
 fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLeaf]) -> ColorImage {
-    let mut image = ColorImage::new([pw, ph], Color32::BLACK);
+    let mut image = ColorImage::new([pw, ph], Color32::TRANSPARENT);
 
     // Precompute normalized light direction
     let (lx, ly, lz) = {
@@ -340,32 +425,144 @@ fn find_node_at(node: &FileNode, pos: egui::Pos2) -> Option<NodeId> {
     Some(node.id)
 }
 
-fn paint_overlays(painter: &egui::Painter, node: &FileNode, depth: usize, prefs: &AppPrefs) {
+fn paint_folder_backgrounds(
+    painter: &egui::Painter,
+    node: &FileNode,
+    depth: usize,
+    prefs: &AppPrefs,
+) {
+    if !node.is_dir {
+        return;
+    }
+
     let rect = to_egui_rect(&node.rect);
-    if node.is_dir && depth > 0 && depth <= prefs.treemap_folder_depth {
+    if depth <= prefs.treemap_folder_depth {
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(40, 40, 40));
+
+        if let Some(header) = folder_header_rect(&node.rect, depth, prefs) {
+            painter.rect_filled(to_egui_rect(&header), 0.0, Color32::from_rgb(50, 50, 50));
+        }
+
+        let content = folder_content_rect(&node.rect, depth, prefs);
+        painter.rect_filled(to_egui_rect(&content), 0.0, Color32::from_rgb(28, 28, 28));
+    }
+
+    for child in node.children.iter() {
+        paint_folder_backgrounds(painter, child, depth + 1, prefs);
+    }
+}
+
+fn paint_folder_labels_and_borders(
+    painter: &egui::Painter,
+    node: &FileNode,
+    depth: usize,
+    prefs: &AppPrefs,
+    deleted_nodes: &BTreeSet<NodeId>,
+) {
+    if !node.is_dir {
+        return;
+    }
+
+    let rect = to_egui_rect(&node.rect);
+    if depth <= prefs.treemap_folder_depth {
+        if let Some(header) = folder_header_rect(&node.rect, depth, prefs) {
+            let header_rect = to_egui_rect(&header);
+            let label = format!(
+                "{} ({})",
+                folder_display_name(node, depth),
+                format_size(node.size)
+            );
+            let label_pos = pos2(header_rect.left() + 4.0, header_rect.center().y);
+            painter.with_clip_rect(header_rect).text(
+                label_pos,
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(11.0),
+                if deleted_nodes.contains(&node.id) {
+                    Color32::from_rgb(255, 70, 70)
+                } else {
+                    Color32::from_rgb(235, 235, 235)
+                },
+            );
+        }
         painter.rect_stroke(
             rect,
             0.0,
-            egui::Stroke::new(1.0, Color32::from_white_alpha(90)),
+            egui::Stroke::new(1.0, Color32::from_rgb(76, 76, 76)),
             egui::StrokeKind::Inside,
         );
     }
-    if depth > 0
-        && depth <= prefs.treemap_label_depth
-        && rect.width() >= 64.0
-        && rect.height() >= 28.0
-    {
-        let label = format!("{}\n{}", node.name, format_size(node.size));
-        painter.text(
-            rect.left_top() + egui::vec2(4.0, 4.0),
-            egui::Align2::LEFT_TOP,
-            label,
-            egui::FontId::proportional(11.0),
-            Color32::WHITE,
-        );
-    }
+
     for child in node.children.iter() {
-        paint_overlays(painter, child, depth + 1, prefs);
+        paint_folder_labels_and_borders(painter, child, depth + 1, prefs, deleted_nodes);
+    }
+}
+
+fn paint_file_labels(painter: &egui::Painter, node: &FileNode, depth: usize, prefs: &AppPrefs) {
+    if node.is_dir {
+        for child in node.children.iter() {
+            paint_file_labels(painter, child, depth + 1, prefs);
+        }
+        return;
+    }
+
+    if prefs.treemap_label_depth == 0 || depth > prefs.treemap_label_depth {
+        return;
+    }
+
+    let rect = to_egui_rect(&node.rect);
+    if rect.width() < 92.0 || rect.height() < 34.0 {
+        return;
+    }
+
+    let label = format!("{} ({})", node.name, format_size(node.size));
+    let font_id = egui::FontId::proportional(10.5);
+    let galley = painter.layout_no_wrap(label, font_id, Color32::WHITE);
+    let badge_w = (galley.size().x + 8.0).min(rect.width() - 4.0);
+    let badge_h = (galley.size().y + 5.0).min(rect.height() - 4.0);
+    if badge_w <= 12.0 || badge_h <= 10.0 {
+        return;
+    }
+
+    let badge = Rect::from_min_size(
+        rect.left_top() + egui::vec2(2.0, 2.0),
+        egui::vec2(badge_w, badge_h),
+    );
+    painter.rect_filled(badge, 2.0, Color32::from_black_alpha(175));
+    painter.with_clip_rect(badge.shrink(3.0)).galley(
+        badge.left_top() + egui::vec2(4.0, 2.0),
+        galley,
+        Color32::WHITE,
+    );
+}
+
+fn paint_deleted_outlines(
+    painter: &egui::Painter,
+    node: &FileNode,
+    deleted_outlines: &BTreeSet<NodeId>,
+) {
+    if deleted_outlines.contains(&node.id) {
+        let rect = to_egui_rect(&node.rect);
+        if rect.width() > 0.0 && rect.height() > 0.0 {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(2.0, Color32::from_rgb(255, 40, 40)),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+
+    for child in node.children.iter() {
+        paint_deleted_outlines(painter, child, deleted_outlines);
+    }
+}
+
+fn folder_display_name(node: &FileNode, depth: usize) -> &str {
+    if depth == 0 {
+        node.name.rsplit('/').next().unwrap_or(&node.name)
+    } else {
+        &node.name
     }
 }
 

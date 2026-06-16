@@ -36,6 +36,8 @@ pub fn show(
     selected: &mut Option<NodeId>,
     hovered: &mut Option<NodeId>,
     expanded: &mut BTreeSet<NodeId>,
+    deleted_nodes: &BTreeSet<NodeId>,
+    deleted_outlines: &BTreeSet<NodeId>,
     active_pane: &mut ActivePane,
     prefs: &mut AppPrefs,
     prefs_changed: &mut bool,
@@ -83,6 +85,8 @@ pub fn show(
                         selected,
                         hovered,
                         expanded,
+                        deleted_nodes,
+                        deleted_outlines,
                         active_pane,
                         prefs,
                         frame_fill,
@@ -181,6 +185,8 @@ fn show_row(
     selected: &mut Option<NodeId>,
     hovered: &mut Option<NodeId>,
     expanded: &mut BTreeSet<NodeId>,
+    deleted_nodes: &BTreeSet<NodeId>,
+    deleted_outlines: &BTreeSet<NodeId>,
     active_pane: &mut ActivePane,
     prefs: &AppPrefs,
     frame_fill: Color32,
@@ -225,7 +231,17 @@ fn show_row(
                 *active_pane = ActivePane::Table;
                 node_context_menu(ui, row.id, &mut command);
             });
-            paint_cell(ui, rect, tree, row, pref.column, expanded, is_selected);
+            let is_deleted = row_is_deleted(row.id, deleted_nodes, deleted_outlines);
+            paint_cell(
+                ui,
+                rect,
+                tree,
+                row,
+                pref.column,
+                expanded,
+                is_selected,
+                is_deleted,
+            );
             ui.allocate_exact_size(vec2(RESIZE_W, ROW_H), Sense::hover());
         }
     });
@@ -240,8 +256,11 @@ fn paint_cell(
     column: TableColumn,
     expanded: &mut BTreeSet<NodeId>,
     is_selected: bool,
+    is_deleted: bool,
 ) {
-    let text_color = if is_selected {
+    let text_color = if is_deleted {
+        Color32::from_rgb(230, 45, 45)
+    } else if is_selected {
         Color32::WHITE
     } else {
         ui.visuals().text_color()
@@ -265,12 +284,15 @@ fn paint_cell(
                 } else {
                     "▸"
                 };
-                ui.painter().text(
+                paint_text(
+                    ui,
+                    arrow_rect,
                     arrow_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     glyph,
                     egui::FontId::proportional(13.0),
                     text_color,
+                    is_deleted,
                 );
             }
             x += 16.0;
@@ -279,15 +301,18 @@ fn paint_cell(
                 paint_folder_icon(ui.painter(), icon_rect);
                 x = icon_rect.right() + 5.0;
             }
-            ui.painter().text(
+            paint_text(
+                ui,
+                rect,
                 pos2(x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 row.display_name.as_str(),
                 egui::FontId::proportional(13.0),
                 text_color,
+                is_deleted,
             );
         }
-        TableColumn::Size => paint_right(ui, rect, &format_size(row.size), text_color),
+        TableColumn::Size => paint_right(ui, rect, &format_size(row.size), text_color, is_deleted),
         TableColumn::PercentOfParent => {
             let pct = if let Some(parent_size) = row.parent_size {
                 if parent_size > 0 {
@@ -298,16 +323,29 @@ fn paint_cell(
             } else {
                 "100.0%".to_owned()
             };
-            paint_right(ui, rect, &pct, text_color);
+            paint_right(ui, rect, &pct, text_color, is_deleted);
         }
         TableColumn::Items => paint_right(
             ui,
             rect,
             &format_count(row.file_count + row.dir_count),
             text_color,
+            is_deleted,
         ),
-        TableColumn::Files => paint_right(ui, rect, &format_count(row.file_count), text_color),
-        TableColumn::Folders => paint_right(ui, rect, &format_count(row.dir_count), text_color),
+        TableColumn::Files => paint_right(
+            ui,
+            rect,
+            &format_count(row.file_count),
+            text_color,
+            is_deleted,
+        ),
+        TableColumn::Folders => paint_right(
+            ui,
+            rect,
+            &format_count(row.dir_count),
+            text_color,
+            is_deleted,
+        ),
         TableColumn::Modified => {
             let text = tree
                 .root
@@ -315,25 +353,57 @@ fn paint_cell(
                 .and_then(|node| node.modified)
                 .map(format_modified)
                 .unwrap_or_default();
-            ui.painter().text(
+            paint_text(
+                ui,
+                rect,
                 pos2(rect.left() + 6.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                text,
+                &text,
                 egui::FontId::proportional(12.0),
                 text_color,
+                is_deleted,
             );
         }
     }
 }
 
-fn paint_right(ui: &egui::Ui, rect: Rect, text: &str, color: Color32) {
-    ui.painter().text(
+fn paint_right(ui: &egui::Ui, rect: Rect, text: &str, color: Color32, strike: bool) {
+    paint_text(
+        ui,
+        rect,
         pos2(rect.right() - 6.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         text,
         egui::FontId::proportional(12.0),
         color,
+        strike,
     );
+}
+
+fn paint_text(
+    ui: &egui::Ui,
+    cell_rect: Rect,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    font_id: egui::FontId,
+    color: Color32,
+    strike: bool,
+) {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font_id, color);
+    let text_rect = align.anchor_size(pos, galley.size());
+    ui.painter().galley(text_rect.min, galley, color);
+
+    if strike && !text.is_empty() {
+        let strike_rect = text_rect.intersect(cell_rect.shrink2(vec2(4.0, 0.0)));
+        if strike_rect.width() > 1.0 {
+            let y = strike_rect.center().y;
+            ui.painter().line_segment(
+                [pos2(strike_rect.left(), y), pos2(strike_rect.right(), y)],
+                Stroke::new(1.0, Color32::from_rgb(230, 45, 45)),
+            );
+        }
+    }
 }
 
 fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCommand>) {
@@ -354,6 +424,14 @@ fn node_context_menu(ui: &mut egui::Ui, id: NodeId, command: &mut Option<NodeCom
         *command = Some(NodeCommand::Delete { id, confirm: true });
         ui.close_menu();
     }
+}
+
+fn row_is_deleted(
+    id: NodeId,
+    deleted_nodes: &BTreeSet<NodeId>,
+    deleted_outlines: &BTreeSet<NodeId>,
+) -> bool {
+    deleted_nodes.contains(&id) || deleted_outlines.contains(&id)
 }
 
 fn handle_keyboard(
