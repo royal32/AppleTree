@@ -333,19 +333,27 @@ impl LoadedState {
                 });
             }
             SplitOrientation::TopBottom => {
+                let table_response = egui::TopBottomPanel::top("file_table_top")
+                    .default_height(prefs.top_bottom_table_height)
+                    .min_height(180.0)
+                    .resizable(true)
+                    .frame(
+                        egui::Frame::side_top_panel(ctx.style().as_ref())
+                            .inner_margin(egui::Margin::from(8)),
+                    )
+                    .show(ctx, |ui| {
+                        if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
+                            *command = Some(cmd);
+                        }
+                    });
+                let new_height = table_response.response.rect.height();
+                if (new_height - prefs.top_bottom_table_height).abs() > 1.0 {
+                    prefs.top_bottom_table_height = new_height;
+                    prefs.mark_changed(prefs_changed);
+                }
+
                 egui::CentralPanel::default().show(ctx, |ui| {
                     self.show_breadcrumb_area(ui);
-                    let table_h = (ui.available_height() * 0.42).max(220.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), table_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
-                                *command = Some(cmd);
-                            }
-                        },
-                    );
-                    ui.separator();
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
                         *command = Some(cmd);
                     }

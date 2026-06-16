@@ -107,6 +107,7 @@ pub struct AppPrefs {
     pub sort_column: TableColumn,
     pub sort_descending: bool,
     pub columns: Vec<ColumnPrefs>,
+    pub top_bottom_table_height: f32,
     pub treemap_folder_depth: usize,
     pub treemap_label_depth: usize,
 }
@@ -124,6 +125,7 @@ impl Default for AppPrefs {
                     width: column.default_width(),
                 })
                 .collect(),
+            top_bottom_table_height: 320.0,
             treemap_folder_depth: 2,
             treemap_label_depth: 1,
         }
@@ -164,6 +166,11 @@ impl AppPrefs {
                         prefs.columns = columns;
                     }
                 }
+                "top_bottom_table_height" => {
+                    if let Ok(height) = value.trim().parse::<f32>() {
+                        prefs.top_bottom_table_height = height.clamp(180.0, 1200.0);
+                    }
+                }
                 "treemap_folder_depth" => {
                     if let Ok(depth) = value.trim().parse() {
                         prefs.treemap_folder_depth = depth;
@@ -200,11 +207,12 @@ impl AppPrefs {
             .join(",");
         let direction = if self.sort_descending { "desc" } else { "asc" };
         let text = format!(
-            "split={}\nsort={}:{}\ncolumns={}\ntreemap_folder_depth={}\ntreemap_label_depth={}\n",
+            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\n",
             self.split_orientation.as_str(),
             self.sort_column.id(),
             direction,
             columns,
+            self.top_bottom_table_height,
             self.treemap_folder_depth,
             self.treemap_label_depth,
         );
