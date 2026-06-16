@@ -7,7 +7,7 @@ use crate::format_size;
 use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::AppPrefs;
-use crate::ui::{ActivePane, NodeCommand};
+use crate::ui::{self, ActivePane, NodeCommand};
 
 /// Cushion surface coefficients: [a_x, a_y, c_x, c_y]
 /// z(x,y) = a_x*x^2 + a_y*y^2 + c_x*x + c_y*y
@@ -181,7 +181,7 @@ pub fn show(
     if let Some(id) = menu_target {
         response.context_menu(|ui| {
             let can_zoom_in = tree.root.resolve_id(id).is_some_and(|node| node.is_dir);
-            node_context_menu(ui, id, can_zoom_in, &mut command);
+            ui::node_context_menu(ui, id, can_zoom_in, "Zoom In", &mut command);
         });
     }
 
@@ -189,20 +189,18 @@ pub fn show(
     if !ui.ctx().is_context_menu_open()
         && !response.secondary_clicked()
         && let Some(pos) = response.hover_pos()
+        && let Some(id) = find_node_at(display_root, pos)
+        && let Some(node) = display_root.resolve_id(id)
     {
-        if let Some(id) = find_node_at(display_root, pos)
-            && let Some(node) = display_root.resolve_id(id)
-        {
-            *hovered = Some(id);
-            let full_path = tree
-                .full_display_path_for_id(id)
-                .unwrap_or_else(|| node.name.to_string());
-            let tip = format!("{}\n{}", full_path, format_size(node.size));
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
-                ui.set_max_width(560.0);
-                ui.label(tip);
-            });
-        }
+        *hovered = Some(id);
+        let full_path = tree
+            .full_display_path_for_id(id)
+            .unwrap_or_else(|| node.name.to_string());
+        let tip = format!("{}\n{}", full_path, format_size(node.size));
+        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
+            ui.set_max_width(560.0);
+            ui.label(tip);
+        });
     }
 
     paint_folder_labels_and_borders(&painter, display_root, 0, prefs, deleted_nodes);
@@ -562,40 +560,6 @@ fn paint_deleted_outlines(
 
     for child in node.children.iter() {
         paint_deleted_outlines(painter, child, deleted_outlines);
-    }
-}
-
-fn node_context_menu(
-    ui: &mut egui::Ui,
-    id: NodeId,
-    can_zoom_in: bool,
-    command: &mut Option<NodeCommand>,
-) {
-    if can_zoom_in && ui.button("Zoom In").clicked() {
-        *command = Some(NodeCommand::ZoomIn(id));
-        ui.close_menu();
-    }
-    if ui.button("Zoom Out").clicked() {
-        *command = Some(NodeCommand::ZoomOut);
-        ui.close_menu();
-    }
-    ui.separator();
-    if ui.button("Open").clicked() {
-        *command = Some(NodeCommand::Open(id));
-        ui.close_menu();
-    }
-    if ui.button("Reveal in Finder").clicked() {
-        *command = Some(NodeCommand::Reveal(id));
-        ui.close_menu();
-    }
-    if ui.button("Copy Path").clicked() {
-        *command = Some(NodeCommand::CopyPath(id));
-        ui.close_menu();
-    }
-    ui.separator();
-    if ui.button("Delete").clicked() {
-        *command = Some(NodeCommand::Delete { id, confirm: true });
-        ui.close_menu();
     }
 }
 

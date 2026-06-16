@@ -8,7 +8,7 @@ use crate::format_size;
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::{AppPrefs, TableColumn};
 use crate::ui::file_icons::{self, FileIconCache};
-use crate::ui::{ActivePane, NodeCommand};
+use crate::ui::{self, ActivePane, NodeCommand};
 
 const HEADER_H: f32 = 24.0;
 const ROW_H: f32 = 22.0;
@@ -59,7 +59,7 @@ pub fn show(
 
     let mut command = None;
     let mut rows = Vec::new();
-    collect_rows(&tree.root, None, 0, &[], expanded, prefs, &mut rows);
+    collect_rows(&tree.root, None, 0, expanded, prefs, &mut rows);
 
     let arrow_command = handle_keyboard(ui.ctx(), tree, selected, expanded, active_pane, &rows);
     if command.is_none() {
@@ -78,7 +78,6 @@ pub fn show(
                 for (row_index, row) in rows.iter().enumerate() {
                     if let Some(cmd) = show_row(
                         ui,
-                        tree,
                         row,
                         row_index,
                         selected,
@@ -141,18 +140,18 @@ fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool
                     prefs.sort_column = column;
                     prefs.sort_descending = column != TableColumn::Name;
                 }
-                prefs.mark_changed(prefs_changed);
+                *prefs_changed = true;
             }
 
             response.context_menu(|ui| {
                 if ui.button("Move Column Left").clicked() {
                     prefs.move_column_left(column);
-                    prefs.mark_changed(prefs_changed);
+                    *prefs_changed = true;
                     ui.close_menu();
                 }
                 if ui.button("Move Column Right").clicked() {
                     prefs.move_column_right(column);
-                    prefs.mark_changed(prefs_changed);
+                    *prefs_changed = true;
                     ui.close_menu();
                 }
             });
@@ -170,7 +169,7 @@ fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool
                 let delta_x = ui.input(|i| i.pointer.delta().x);
                 prefs.columns[index].width =
                     (prefs.columns[index].width + delta_x).clamp(48.0, 480.0);
-                prefs.mark_changed(prefs_changed);
+                *prefs_changed = true;
             }
         }
     });
@@ -179,8 +178,7 @@ fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool
 #[allow(clippy::too_many_arguments)]
 fn show_row(
     ui: &mut egui::Ui,
-    tree: &FileTree,
-    row: &RowInfo,
+    row: &RowInfo<'_>,
     row_index: usize,
     selected: &mut Option<NodeId>,
     hovered: &mut Option<NodeId>,
@@ -230,13 +228,12 @@ fn show_row(
             cell_resp.context_menu(|ui| {
                 *selected = Some(row.id);
                 *active_pane = ActivePane::Table;
-                node_context_menu(ui, row.id, row.is_dir, &mut command);
+                ui::node_context_menu(ui, row.id, row.is_dir, "Zoom In Treemap", &mut command);
             });
             let is_deleted = row_is_deleted(row.id, deleted_nodes, deleted_outlines);
             paint_cell(
                 ui,
                 rect,
-                tree,
                 row,
                 pref.column,
                 expanded,
@@ -253,8 +250,7 @@ fn show_row(
 fn paint_cell(
     ui: &mut egui::Ui,
     rect: Rect,
-    tree: &FileTree,
-    row: &RowInfo,
+    row: &RowInfo<'_>,
     column: TableColumn,
     expanded: &mut BTreeSet<NodeId>,
     is_selected: bool,
@@ -301,9 +297,7 @@ fn paint_cell(
             x += 16.0;
             let icon_rect =
                 Rect::from_center_size(pos2(x + 8.0, rect.center().y), vec2(16.0, 16.0));
-            if let Some(texture) =
-                file_icons.texture_for(ui.ctx(), row.is_dir, row.display_name.as_str())
-            {
+            if let Some(texture) = file_icons.texture_for(ui.ctx(), row.is_dir, row.display_name) {
                 ui.painter().image(
                     texture.id(),
                     icon_rect,
@@ -321,7 +315,7 @@ fn paint_cell(
                 rect,
                 pos2(x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                row.display_name.as_str(),
+                row.display_name,
                 egui::FontId::proportional(13.0),
                 text_color,
                 is_deleted,
@@ -368,12 +362,7 @@ fn paint_cell(
             is_deleted,
         ),
         TableColumn::Modified => {
-            let text = tree
-                .root
-                .resolve_id(row.id)
-                .and_then(|node| node.modified)
-                .map(format_modified)
-                .unwrap_or_default();
+            let text = row.modified.map(format_modified).unwrap_or_default();
             paint_text(
                 ui,
                 rect,
@@ -445,40 +434,6 @@ fn paint_text(
     }
 }
 
-fn node_context_menu(
-    ui: &mut egui::Ui,
-    id: NodeId,
-    can_zoom_in: bool,
-    command: &mut Option<NodeCommand>,
-) {
-    if can_zoom_in && ui.button("Zoom In Treemap").clicked() {
-        *command = Some(NodeCommand::ZoomIn(id));
-        ui.close_menu();
-    }
-    if ui.button("Zoom Out Treemap").clicked() {
-        *command = Some(NodeCommand::ZoomOut);
-        ui.close_menu();
-    }
-    ui.separator();
-    if ui.button("Open").clicked() {
-        *command = Some(NodeCommand::Open(id));
-        ui.close_menu();
-    }
-    if ui.button("Reveal in Finder").clicked() {
-        *command = Some(NodeCommand::Reveal(id));
-        ui.close_menu();
-    }
-    if ui.button("Copy Path").clicked() {
-        *command = Some(NodeCommand::CopyPath(id));
-        ui.close_menu();
-    }
-    ui.separator();
-    if ui.button("Delete").clicked() {
-        *command = Some(NodeCommand::Delete { id, confirm: true });
-        ui.close_menu();
-    }
-}
-
 fn row_is_deleted(
     id: NodeId,
     deleted_nodes: &BTreeSet<NodeId>,
@@ -493,7 +448,7 @@ fn handle_keyboard(
     selected: &mut Option<NodeId>,
     expanded: &mut BTreeSet<NodeId>,
     active_pane: &mut ActivePane,
-    rows: &[RowInfo],
+    rows: &[RowInfo<'_>],
 ) -> Option<NodeCommand> {
     if *active_pane != ActivePane::Table {
         return None;
@@ -531,9 +486,7 @@ fn handle_keyboard(
         }
     });
 
-    let Some(key) = key else {
-        return None;
-    };
+    let key = key?;
     let current = selected
         .and_then(|id| rows.iter().position(|row| row.id == id))
         .unwrap_or(0);
@@ -577,34 +530,34 @@ fn handle_keyboard(
     None
 }
 
-struct RowInfo {
+struct RowInfo<'a> {
     id: NodeId,
-    display_name: String,
+    display_name: &'a str,
     size: u64,
     file_count: u64,
     dir_count: u64,
+    modified: Option<SystemTime>,
     is_dir: bool,
     has_children: bool,
     depth: usize,
     parent_size: Option<u64>,
 }
 
-fn collect_rows(
-    node: &FileNode,
+fn collect_rows<'a>(
+    node: &'a FileNode,
     parent_size: Option<u64>,
     depth: usize,
-    path: &[usize],
     expanded: &BTreeSet<NodeId>,
     prefs: &AppPrefs,
-    rows: &mut Vec<RowInfo>,
+    rows: &mut Vec<RowInfo<'a>>,
 ) {
-    let display_name = node.name.to_string();
     rows.push(RowInfo {
         id: node.id,
-        display_name,
+        display_name: &node.name,
         size: node.size,
         file_count: node.file_count,
         dir_count: node.dir_count,
+        modified: node.modified,
         is_dir: node.is_dir,
         has_children: !node.children.is_empty(),
         depth,
@@ -618,13 +571,10 @@ fn collect_rows(
     let mut child_indices = (0..node.children.len()).collect::<Vec<_>>();
     child_indices.sort_by(|&a, &b| compare_nodes(&node.children[a], &node.children[b], prefs));
     for child_index in child_indices {
-        let mut child_path = path.to_vec();
-        child_path.push(child_index);
         collect_rows(
             &node.children[child_index],
             Some(node.size),
             depth + 1,
-            &child_path,
             expanded,
             prefs,
             rows,

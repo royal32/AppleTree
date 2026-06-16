@@ -221,10 +221,6 @@ impl AppPrefs {
         }
     }
 
-    pub fn mark_changed(&self, changed: &mut bool) {
-        *changed = true;
-    }
-
     pub fn ensure_all_columns(&mut self) {
         for column in TableColumn::ALL {
             if !self.columns.iter().any(|pref| pref.column == column) {

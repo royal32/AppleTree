@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -105,18 +106,6 @@ impl FileNode {
         }
         false
     }
-
-    /// Remove the child at `index` from this node's children, updating size and counts.
-    /// Returns the removed child.
-    pub fn remove_child(&mut self, index: usize) -> FileNode {
-        let mut children = std::mem::take(&mut self.children).into_vec();
-        let removed = children.remove(index);
-        self.size = self.size.saturating_sub(removed.size);
-        self.file_count = self.file_count.saturating_sub(removed.file_count);
-        self.dir_count = self.dir_count.saturating_sub(removed.dir_count);
-        self.children = children.into();
-        removed
-    }
 }
 
 /// The complete scanned file tree with precomputed extension statistics.
@@ -164,7 +153,7 @@ impl FileTree {
             .unwrap_or_else(|e| e.into_inner())
             .into_iter()
             .collect();
-        extensions.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        extensions.sort_unstable_by_key(|(_, size)| Reverse(*size));
 
         FileTree {
             root: root_node,
@@ -194,76 +183,6 @@ impl FileTree {
     pub fn full_display_path_for_id(&self, id: NodeId) -> Option<String> {
         self.build_fs_path_for_id(id)
             .map(|path| path.display().to_string())
-    }
-
-    /// Remove the node at the given index path from the tree, updating all ancestor sizes/counts.
-    /// Returns the removed node, or None if the path is invalid.
-    pub fn remove_at_path(&mut self, path: &[usize]) -> Option<FileNode> {
-        let (&child_idx, parent_path) = path.split_last()?;
-
-        // Navigate to the parent
-        let mut node = &mut self.root;
-        for &idx in parent_path {
-            node = node.children.get_mut(idx)?;
-        }
-
-        if child_idx >= node.children.len() {
-            return None;
-        }
-
-        Some(node.remove_child(child_idx))
-    }
-
-    /// Propagate a size/count reduction up the ancestor chain (excluding the node itself).
-    pub fn subtract_from_ancestors(
-        &mut self,
-        path: &[usize],
-        size: u64,
-        file_count: u64,
-        dir_count: u64,
-    ) {
-        // The direct parent is already updated by remove_child; update grandparents and above.
-        let mut node = &mut self.root;
-        // Update root
-        node.size = node.size.saturating_sub(size);
-        node.file_count = node.file_count.saturating_sub(file_count);
-        node.dir_count = node.dir_count.saturating_sub(dir_count);
-        // Update intermediate ancestors (not the direct parent, which remove_child handles)
-        if path.len() >= 2 {
-            for &idx in &path[..path.len() - 2] {
-                if let Some(child) = node.children.get_mut(idx) {
-                    child.size = child.size.saturating_sub(size);
-                    child.file_count = child.file_count.saturating_sub(file_count);
-                    child.dir_count = child.dir_count.saturating_sub(dir_count);
-                    node = child;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Rebuild extension statistics from the current tree.
-    pub fn rebuild_extensions(&mut self) {
-        let mut ext_map: HashMap<Box<str>, u64> = HashMap::new();
-        collect_extensions(&self.root, &mut ext_map);
-        let mut extensions: Vec<(Box<str>, u64)> = ext_map.into_iter().collect();
-        extensions.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-        self.extensions = extensions;
-    }
-}
-
-fn collect_extensions(node: &FileNode, map: &mut HashMap<Box<str>, u64>) {
-    if !node.is_dir {
-        let ext = node.extension();
-        if !ext.is_empty() {
-            *map.entry(ext.into()).or_default() += node.size;
-        } else {
-            *map.entry("(no ext)".into()).or_default() += node.size;
-        }
-    }
-    for child in node.children.iter() {
-        collect_extensions(child, map);
     }
 }
 
@@ -370,7 +289,7 @@ fn build_node_fd(
     children.extend(file_nodes);
     children.extend(dir_nodes);
 
-    children.sort_unstable_by(|a, b| b.size.cmp(&a.size));
+    children.sort_unstable_by_key(|child| Reverse(child.size));
 
     FileNode {
         id: 0,

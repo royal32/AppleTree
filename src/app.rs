@@ -283,7 +283,7 @@ impl LoadedState {
                         "Left/Right",
                     );
                     if prefs.split_orientation != before_split {
-                        prefs.mark_changed(prefs_changed);
+                        *prefs_changed = true;
                     }
 
                     ui.separator();
@@ -294,14 +294,14 @@ impl LoadedState {
                         .changed()
                     {
                         prefs.treemap_label_depth = label_depth as usize;
-                        prefs.mark_changed(prefs_changed);
+                        *prefs_changed = true;
                     }
                     if ui
                         .add(egui::Slider::new(&mut folder_depth, 0..=6).text("Boxes"))
                         .changed()
                     {
                         prefs.treemap_folder_depth = folder_depth as usize;
-                        prefs.mark_changed(prefs_changed);
+                        *prefs_changed = true;
                         self.cached_layout_rect = None;
                         self.treemap_texture = None;
                     }
@@ -357,7 +357,7 @@ impl LoadedState {
                 let new_height = table_response.response.rect.height();
                 if (new_height - prefs.top_bottom_table_height).abs() > 1.0 {
                     prefs.top_bottom_table_height = new_height;
-                    prefs.mark_changed(prefs_changed);
+                    *prefs_changed = true;
                 }
 
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -519,7 +519,7 @@ impl DeleteTarget {
     fn from_id(tree: &FileTree, id: NodeId) -> Option<Self> {
         let sel_path = tree.root.path_to_id(id)?;
         let fs_path = tree.build_fs_path(&sel_path)?;
-        let node = tree.root.resolve_id(id)?;
+        let node = tree.root.resolve_path(&sel_path)?;
         Some(Self {
             id,
             fs_path,
