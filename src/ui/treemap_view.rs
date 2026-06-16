@@ -178,7 +178,10 @@ pub fn show(
     }
 
     // Hover tooltip
-    if let Some(pos) = response.hover_pos() {
+    if !ui.ctx().is_context_menu_open()
+        && !response.secondary_clicked()
+        && let Some(pos) = response.hover_pos()
+    {
         if let Some(id) = find_node_at(&tree.root, pos)
             && let Some(node) = tree.root.resolve_id(id)
         {
