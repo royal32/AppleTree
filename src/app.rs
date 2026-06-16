@@ -31,7 +31,10 @@ struct LoadedState {
 }
 
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>, initial_path: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial_path: Option<String>) -> Self {
+        #[cfg(target_os = "macos")]
+        use_macos_system_font(&cc.egui_ctx);
+
         let mut app = Self {
             state: AppState::WaitingForPicker { frames: 2 },
             #[cfg(target_os = "macos")]
@@ -49,6 +52,27 @@ impl App {
             start_time: Instant::now(),
         };
     }
+}
+
+#[cfg(target_os = "macos")]
+fn use_macos_system_font(ctx: &egui::Context) {
+    let Ok(bytes) = std::fs::read("/System/Library/Fonts/SFNS.ttf") else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "SFNS".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "SFNS".to_owned());
+
+    ctx.set_fonts(fonts);
 }
 
 impl eframe::App for App {
