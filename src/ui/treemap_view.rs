@@ -467,11 +467,7 @@ fn paint_folder_labels_and_borders(
     if depth <= prefs.treemap_folder_depth {
         if let Some(header) = folder_header_rect(&node.rect, depth, prefs) {
             let header_rect = to_egui_rect(&header);
-            let label = format!(
-                "{} ({})",
-                folder_display_name(node, depth),
-                format_size(node.size)
-            );
+            let label = format!("{} ({})", node.name, format_size(node.size));
             let label_pos = pos2(header_rect.left() + 4.0, header_rect.center().y);
             painter.with_clip_rect(header_rect).text(
                 label_pos,
@@ -555,14 +551,6 @@ fn paint_deleted_outlines(
 
     for child in node.children.iter() {
         paint_deleted_outlines(painter, child, deleted_outlines);
-    }
-}
-
-fn folder_display_name(node: &FileNode, depth: usize) -> &str {
-    if depth == 0 {
-        node.name.rsplit('/').next().unwrap_or(&node.name)
-    } else {
-        &node.name
     }
 }
 

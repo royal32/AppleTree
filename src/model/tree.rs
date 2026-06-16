@@ -271,11 +271,19 @@ fn build_root_node(path: &Path) -> FileNode {
             path
         );
     }
-    let name: Box<str> = path.display().to_string().into();
+    let name: Box<str> = root_display_name(path).into();
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let node = build_node_fd(fd, name, modified);
     getattrlistbulk::close_dir(fd);
     node
+}
+
+fn root_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Build a FileNode from an already-opened directory fd.
@@ -441,5 +449,10 @@ mod tests {
             tree.full_display_path_for_id(2),
             Some("/tmp/root/a".to_owned())
         );
+    }
+
+    #[test]
+    fn root_display_name_ignores_trailing_slash() {
+        assert_eq!(root_display_name(Path::new("/tmp/example/")), "example");
     }
 }

@@ -545,15 +545,7 @@ fn collect_rows(
     prefs: &AppPrefs,
     rows: &mut Vec<RowInfo>,
 ) {
-    let display_name = if depth == 0 {
-        node.name
-            .rsplit('/')
-            .next()
-            .unwrap_or(&node.name)
-            .to_owned()
-    } else {
-        node.name.to_string()
-    };
+    let display_name = node.name.to_string();
     rows.push(RowInfo {
         id: node.id,
         display_name,
