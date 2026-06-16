@@ -39,6 +39,7 @@ struct LoadedState {
     status_message: Option<String>,
     scan_time_ms: f64,
     cached_layout_rect: Option<egui::Rect>,
+    treemap_cache: ui::treemap_view::TreemapCache,
     treemap_texture: Option<egui::TextureHandle>,
     pending_scan: Option<PathBuf>,
     file_icons: FileIconCache,
@@ -131,6 +132,7 @@ impl eframe::App for App {
                 status_message: None,
                 scan_time_ms,
                 cached_layout_rect: None,
+                treemap_cache: ui::treemap_view::TreemapCache::default(),
                 treemap_texture: None,
                 pending_scan: None,
                 file_icons: FileIconCache::default(),
@@ -303,6 +305,7 @@ impl LoadedState {
                         prefs.treemap_folder_depth = folder_depth as usize;
                         *prefs_changed = true;
                         self.cached_layout_rect = None;
+                        self.treemap_cache.clear();
                         self.treemap_texture = None;
                     }
                 });
@@ -404,6 +407,7 @@ impl LoadedState {
             &self.deleted_outlines,
             prefs,
             &mut self.cached_layout_rect,
+            &mut self.treemap_cache,
             &mut self.treemap_texture,
         )
     }
@@ -614,6 +618,7 @@ fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
     loaded.treemap_root = id;
     loaded.selected = Some(id);
     loaded.cached_layout_rect = None;
+    loaded.treemap_cache.clear();
     loaded.treemap_texture = None;
 }
 
@@ -624,6 +629,7 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
         loaded.treemap_root = previous;
         loaded.selected = Some(previous);
         loaded.cached_layout_rect = None;
+        loaded.treemap_cache.clear();
         loaded.treemap_texture = None;
         return;
     }
@@ -632,6 +638,7 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
         loaded.treemap_root = parent_id;
         loaded.selected = Some(parent_id);
         loaded.cached_layout_rect = None;
+        loaded.treemap_cache.clear();
         loaded.treemap_texture = None;
         return;
     }

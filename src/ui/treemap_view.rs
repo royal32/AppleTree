@@ -20,6 +20,49 @@ struct CushionLeaf {
     color: Color32,
 }
 
+#[derive(Default)]
+pub struct TreemapCache {
+    rects: Vec<Rect>,
+    root_path: Vec<usize>,
+}
+
+impl TreemapCache {
+    pub fn clear(&mut self) {
+        self.rects.clear();
+        self.root_path.clear();
+    }
+
+    fn rebuild(&mut self, root: &FileNode, root_path: Vec<usize>) {
+        self.rects.clear();
+        self.root_path = root_path;
+        collect_rects(root, self);
+    }
+
+    fn rect(&self, id: NodeId) -> Option<Rect> {
+        let rect = self.rects.get(id as usize).copied()?;
+        (rect.width() > 0.0 && rect.height() > 0.0).then_some(rect)
+    }
+
+    fn insert_rect(&mut self, id: NodeId, rect: Rect) {
+        let index = id as usize;
+        if self.rects.len() <= index {
+            self.rects.resize(index + 1, Rect::NOTHING);
+        }
+        self.rects[index] = rect;
+    }
+
+    fn tree_path_for_hit(&self, hit: &HitNode<'_>) -> Vec<usize> {
+        let mut path = self.root_path.clone();
+        path.extend_from_slice(&hit.path);
+        path
+    }
+}
+
+struct HitNode<'a> {
+    node: &'a FileNode,
+    path: Vec<usize>,
+}
+
 #[derive(Clone)]
 struct LayoutItem {
     child_index: usize,
@@ -65,6 +108,7 @@ pub fn show(
     deleted_outlines: &BTreeSet<NodeId>,
     prefs: &AppPrefs,
     cached_layout_rect: &mut Option<Rect>,
+    treemap_cache: &mut TreemapCache,
     treemap_texture: &mut Option<TextureHandle>,
 ) -> Option<NodeCommand> {
     let mut command = None;
@@ -111,7 +155,9 @@ pub fn show(
         // Collect cushion leaves
         let mut leaves = Vec::new();
         let surface = [0.0f64; 4];
+        let display_root_path = tree.root.path_to_id(display_root_id).unwrap_or_default();
         if let Some(root) = tree.root.resolve_id(display_root_id) {
+            treemap_cache.rebuild(root, display_root_path);
             collect_cushion_leaves(root, surface, CUSHION_HEIGHT, true, color_map, &mut leaves);
         }
 
@@ -145,8 +191,8 @@ pub fn show(
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
     {
-        if let Some(id) = find_node_at(display_root, pos) {
-            *selected = Some(id);
+        if let Some(hit) = find_node_at(display_root, pos) {
+            *selected = Some(hit.node.id);
             *active_pane = ActivePane::Treemap;
         } else {
             *selected = None;
@@ -159,7 +205,7 @@ pub fn show(
             .ctx()
             .pointer_latest_pos()
             .filter(|pos| canvas.contains(*pos))
-            .and_then(|pos| find_node_at(display_root, pos));
+            .and_then(|pos| find_node_at(display_root, pos).map(|hit| hit.node.id));
 
         ui.ctx().data_mut(|data| {
             if let Some(id) = target {
@@ -189,14 +235,15 @@ pub fn show(
     if !ui.ctx().is_context_menu_open()
         && !response.secondary_clicked()
         && let Some(pos) = response.hover_pos()
-        && let Some(id) = find_node_at(display_root, pos)
-        && let Some(node) = display_root.resolve_id(id)
+        && let Some(hit) = find_node_at(display_root, pos)
     {
-        *hovered = Some(id);
+        *hovered = Some(hit.node.id);
+        let tree_path = treemap_cache.tree_path_for_hit(&hit);
         let full_path = tree
-            .full_display_path_for_id(id)
-            .unwrap_or_else(|| node.name.to_string());
-        let tip = format!("{}\n{}", full_path, format_size(node.size));
+            .build_fs_path(&tree_path)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| hit.node.name.to_string());
+        let tip = format!("{}\n{}", full_path, format_size(hit.node.size));
         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
             ui.set_max_width(560.0);
             ui.label(tip);
@@ -207,35 +254,29 @@ pub fn show(
     paint_file_labels(&painter, display_root, 0, prefs);
 
     if let Some(hover_id) = *hovered
-        && let Some(node) = display_root.resolve_id(hover_id)
+        && let Some(r) = treemap_cache.rect(hover_id)
     {
-        let r = to_egui_rect(&node.rect);
-        if r.width() > 0.0 && r.height() > 0.0 {
-            painter.rect_stroke(
-                r,
-                0.0,
-                egui::Stroke::new(1.0, Color32::WHITE),
-                egui::StrokeKind::Outside,
-            );
-        }
+        painter.rect_stroke(
+            r,
+            0.0,
+            egui::Stroke::new(1.0, Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
     }
 
     // Draw selection highlight
     if let Some(sel_id) = selected
-        && let Some(node) = display_root.resolve_id(*sel_id)
+        && let Some(r) = treemap_cache.rect(*sel_id)
     {
-        let r = to_egui_rect(&node.rect);
-        if r.width() > 0.0 && r.height() > 0.0 {
-            painter.rect_stroke(
-                r,
-                0.0,
-                egui::Stroke::new(2.0, Color32::WHITE),
-                egui::StrokeKind::Outside,
-            );
-        }
+        painter.rect_stroke(
+            r,
+            0.0,
+            egui::Stroke::new(2.0, Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
     }
 
-    paint_deleted_outlines(&painter, display_root, deleted_outlines);
+    paint_deleted_outlines(&painter, treemap_cache, deleted_outlines);
 
     command
 }
@@ -419,19 +460,40 @@ fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLea
     image
 }
 
-fn find_node_at(node: &FileNode, pos: egui::Pos2) -> Option<NodeId> {
+fn collect_rects(node: &FileNode, cache: &mut TreemapCache) {
+    cache.insert_rect(node.id, to_egui_rect(&node.rect));
+    for child in node.children.iter() {
+        collect_rects(child, cache);
+    }
+}
+
+fn find_node_at(node: &FileNode, pos: egui::Pos2) -> Option<HitNode<'_>> {
+    let mut path = Vec::new();
+    find_node_at_inner(node, pos, &mut path)
+}
+
+fn find_node_at_inner<'a>(
+    node: &'a FileNode,
+    pos: egui::Pos2,
+    path: &mut Vec<usize>,
+) -> Option<HitNode<'a>> {
     let r = to_egui_rect(&node.rect);
     if !r.contains(pos) {
         return None;
     }
 
-    for child in node.children.iter() {
-        if let Some(id) = find_node_at(child, pos) {
-            return Some(id);
+    for (index, child) in node.children.iter().enumerate() {
+        path.push(index);
+        if let Some(hit) = find_node_at_inner(child, pos, path) {
+            return Some(hit);
         }
+        path.pop();
     }
 
-    Some(node.id)
+    Some(HitNode {
+        node,
+        path: path.clone(),
+    })
 }
 
 fn paint_folder_backgrounds(
@@ -543,23 +605,19 @@ fn paint_file_labels(painter: &egui::Painter, node: &FileNode, depth: usize, pre
 
 fn paint_deleted_outlines(
     painter: &egui::Painter,
-    node: &FileNode,
+    cache: &TreemapCache,
     deleted_outlines: &BTreeSet<NodeId>,
 ) {
-    if deleted_outlines.contains(&node.id) {
-        let rect = to_egui_rect(&node.rect);
-        if rect.width() > 0.0 && rect.height() > 0.0 {
-            painter.rect_stroke(
-                rect,
-                0.0,
-                egui::Stroke::new(2.0, Color32::from_rgb(255, 40, 40)),
-                egui::StrokeKind::Outside,
-            );
-        }
-    }
-
-    for child in node.children.iter() {
-        paint_deleted_outlines(painter, child, deleted_outlines);
+    for id in deleted_outlines {
+        let Some(rect) = cache.rect(*id) else {
+            continue;
+        };
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(2.0, Color32::from_rgb(255, 40, 40)),
+            egui::StrokeKind::Outside,
+        );
     }
 }
 
