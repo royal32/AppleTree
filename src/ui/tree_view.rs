@@ -314,14 +314,20 @@ fn paint_cell(
         }
         TableColumn::Size => paint_right(ui, rect, &format_size(row.size), text_color, is_deleted),
         TableColumn::PercentOfParent => {
-            let pct = if let Some(parent_size) = row.parent_size {
+            let pct_value = if let Some(parent_size) = row.parent_size {
                 if parent_size > 0 {
-                    format!("{:.1}%", row.size as f64 * 100.0 / parent_size as f64)
+                    row.size as f32 / parent_size as f32
                 } else {
-                    String::new()
+                    0.0
                 }
             } else {
-                "100.0%".to_owned()
+                1.0
+            };
+            paint_percent_bar(ui, rect, pct_value, is_deleted);
+            let pct = if row.parent_size == Some(0) {
+                String::new()
+            } else {
+                format!("{:.1}%", pct_value * 100.0)
             };
             paint_right(ui, rect, &pct, text_color, is_deleted);
         }
@@ -378,6 +384,24 @@ fn paint_right(ui: &egui::Ui, rect: Rect, text: &str, color: Color32, strike: bo
         color,
         strike,
     );
+}
+
+fn paint_percent_bar(ui: &egui::Ui, rect: Rect, fraction: f32, is_deleted: bool) {
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction <= 0.0 {
+        return;
+    }
+
+    let inset = rect.shrink2(vec2(3.0, 4.0));
+    let fill = Rect::from_min_size(inset.min, vec2(inset.width() * fraction, inset.height()));
+    let color = if is_deleted {
+        Color32::from_rgba_unmultiplied(230, 45, 45, 45)
+    } else if ui.visuals().dark_mode {
+        Color32::from_rgba_unmultiplied(120, 150, 190, 48)
+    } else {
+        Color32::from_rgba_unmultiplied(56, 132, 244, 32)
+    };
+    ui.painter().rect_filled(fill, 2.0, color);
 }
 
 fn paint_text(
