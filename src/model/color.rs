@@ -2,8 +2,7 @@ use egui::Color32;
 
 pub const PALETTE_BRIGHTNESS: f64 = 0.6;
 
-// 18 distinct hues, all readable on light backgrounds.
-// Medium-dark, moderately saturated — good for tree text and cushion treemap base.
+// 18 distinct hues, normalized below as cushion treemap base colors.
 const RAW_PALETTE: [(u8, u8, u8); 18] = [
     (0, 0, 200),    // Blue
     (200, 0, 0),    // Red
@@ -24,18 +23,6 @@ const RAW_PALETTE: [(u8, u8, u8); 18] = [
     (120, 70, 40),  // Sienna
     (80, 0, 120),   // Indigo
 ];
-
-/// Raw palette as Color32 — used for tree text where readability matters.
-const PALETTE_TEXT: [Color32; 18] = {
-    let mut result = [Color32::BLACK; 18];
-    let mut i = 0;
-    while i < 18 {
-        let (r, g, b) = RAW_PALETTE[i];
-        result[i] = Color32::from_rgb(r, g, b);
-        i += 1;
-    }
-    result
-};
 
 /// Normalized palette (brightness 0.6) — used as base for cushion treemap shading.
 const PALETTE_TREEMAP: [Color32; 18] = {
@@ -134,9 +121,9 @@ const fn normalize_color(r: u8, g: u8, b: u8, target: f64) -> (u8, u8, u8) {
 
 const DIR_COLOR: Color32 = Color32::from_rgb(100, 100, 100);
 
-/// Maps extensions to colors. Stores paired (text, treemap) colors in a single map.
+/// Maps extensions to cushion treemap base colors.
 pub struct ColorMap {
-    map: std::collections::HashMap<Box<str>, (Color32, Color32)>,
+    map: std::collections::HashMap<Box<str>, Color32>,
 }
 
 impl ColorMap {
@@ -144,21 +131,10 @@ impl ColorMap {
     pub fn from_extensions(extensions: &[(Box<str>, u64)]) -> Self {
         let mut map = std::collections::HashMap::new();
         for (i, (ext, _)) in extensions.iter().enumerate() {
-            let idx = i % PALETTE_TEXT.len();
-            map.insert(ext.clone(), (PALETTE_TEXT[idx], PALETTE_TREEMAP[idx]));
+            let idx = i % PALETTE_TREEMAP.len();
+            map.insert(ext.clone(), PALETTE_TREEMAP[idx]);
         }
         Self { map }
-    }
-
-    /// Get readable text color for an extension (raw palette, good contrast on light backgrounds).
-    pub fn get(&self, extension: &str) -> Color32 {
-        if extension.is_empty() {
-            return DIR_COLOR;
-        }
-        self.map
-            .get(extension)
-            .map(|&(text, _)| text)
-            .unwrap_or(PALETTE_TEXT[PALETTE_TEXT.len() - 1])
     }
 
     /// Get treemap base color for an extension (normalized to brightness 0.6 for cushion shading).
@@ -168,11 +144,7 @@ impl ColorMap {
         }
         self.map
             .get(extension)
-            .map(|&(_, treemap)| treemap)
+            .copied()
             .unwrap_or(PALETTE_TREEMAP[PALETTE_TREEMAP.len() - 1])
-    }
-
-    pub fn dir_color() -> Color32 {
-        DIR_COLOR
     }
 }

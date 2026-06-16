@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use eframe::egui;
 
-use crate::format_size;
 use crate::model::color::ColorMap;
 use crate::model::tree::{FileTree, NodeId};
 use crate::settings::{AppPrefs, SplitOrientation};
 use crate::ui::file_icons::FileIconCache;
 use crate::ui::{self, NodeCommand};
+use crate::{format_compact_count, format_size};
 
 pub struct App {
     state: AppState,
@@ -30,6 +30,7 @@ struct LoadedState {
     color_map: ColorMap,
     pane: ui::PaneState,
     expanded: BTreeSet<NodeId>,
+    table: ui::tree_view::TableState,
     deleted: ui::DeletionOverlay,
     treemap: ui::treemap_view::TreemapState,
     status_message: Option<String>,
@@ -116,6 +117,7 @@ impl eframe::App for App {
                 color_map,
                 pane: ui::PaneState::default(),
                 expanded,
+                table: ui::tree_view::TableState::default(),
                 deleted: ui::DeletionOverlay::default(),
                 treemap,
                 status_message: None,
@@ -216,7 +218,7 @@ impl LoadedState {
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{} Files",
-                    format_file_count(self.tree.root.file_count)
+                    format_compact_count(self.tree.root.file_count)
                 ));
                 ui.separator();
                 ui.label(format!(
@@ -371,6 +373,7 @@ impl LoadedState {
                 expanded: &mut self.expanded,
                 deleted: &self.deleted,
                 file_icons: &mut self.file_icons,
+                table: &mut self.table,
             },
             prefs,
             prefs_changed,
@@ -643,13 +646,8 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
     };
     match result {
         Ok(()) => {
-            loaded.deleted.insert_node(target.id);
             if let Some(node) = loaded.tree.root.resolve_id(target.id) {
-                let before = loaded.deleted.outline_count();
-                collect_deleted_outline_ids(node, &mut loaded.deleted);
-                if loaded.deleted.outline_count() == before {
-                    loaded.deleted.insert_outline(target.id);
-                }
+                loaded.deleted.mark_deleted(node);
             }
             loaded.pane.hovered = None;
             loaded.status_message = Some(format!("Deleted {}", target.name()));
@@ -657,19 +655,6 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
         Err(e) => {
             loaded.status_message = Some(format!("Failed to delete {}: {}", target.name(), e));
         }
-    }
-}
-
-fn collect_deleted_outline_ids(
-    node: &crate::model::tree::FileNode,
-    deleted: &mut ui::DeletionOverlay,
-) {
-    if node.is_dir {
-        for child in node.children.iter() {
-            collect_deleted_outline_ids(child, deleted);
-        }
-    } else {
-        deleted.insert_outline(node.id);
     }
 }
 
@@ -704,25 +689,6 @@ fn reveal_in_finder(path: &std::path::Path, loaded: &mut LoadedState) {
 fn open_path(path: &std::path::Path, loaded: &mut LoadedState) {
     if let Err(e) = std::process::Command::new("open").arg(path).spawn() {
         loaded.status_message = Some(format!("Failed to open {:?}: {}", path, e));
-    }
-}
-
-fn format_file_count(count: u64) -> String {
-    if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 1_000 {
-        // Format with comma separators
-        let s = count.to_string();
-        let mut result = String::new();
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                result.push(',');
-            }
-            result.push(c);
-        }
-        result.chars().rev().collect()
-    } else {
-        count.to_string()
     }
 }
 

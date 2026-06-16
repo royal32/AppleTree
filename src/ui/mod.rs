@@ -4,7 +4,7 @@ pub mod treemap_view;
 
 use std::collections::BTreeSet;
 
-use crate::model::tree::NodeId;
+use crate::model::tree::{FileNode, NodeId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivePane {
@@ -52,16 +52,13 @@ pub struct DeletionOverlay {
 }
 
 impl DeletionOverlay {
-    pub fn insert_node(&mut self, id: NodeId) {
-        self.nodes.insert(id);
-    }
-
-    pub fn insert_outline(&mut self, id: NodeId) {
-        self.outlines.insert(id);
-    }
-
-    pub fn outline_count(&self) -> usize {
-        self.outlines.len()
+    pub fn mark_deleted(&mut self, node: &FileNode) {
+        self.nodes.insert(node.id);
+        let before = self.outlines.len();
+        self.collect_outline_ids(node);
+        if self.outlines.len() == before {
+            self.outlines.insert(node.id);
+        }
     }
 
     pub fn outline_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
@@ -74,6 +71,16 @@ impl DeletionOverlay {
 
     pub fn is_deleted(&self, id: NodeId) -> bool {
         self.is_node_deleted(id) || self.outlines.contains(&id)
+    }
+
+    fn collect_outline_ids(&mut self, node: &FileNode) {
+        if node.is_dir {
+            for child in node.children.iter() {
+                self.collect_outline_ids(child);
+            }
+        } else {
+            self.outlines.insert(node.id);
+        }
     }
 }
 

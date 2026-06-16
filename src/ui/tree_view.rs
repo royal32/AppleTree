@@ -1,14 +1,15 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use egui::{Color32, Id, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use crate::format_size;
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::{AppPrefs, TableColumn};
 use crate::ui::file_icons::{self, FileIconCache};
 use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
+use crate::{format_count, format_modified, format_size};
 
 const HEADER_H: f32 = 24.0;
 const ROW_H: f32 = 22.0;
@@ -19,6 +20,35 @@ pub struct TreeViewState<'a> {
     pub expanded: &'a mut BTreeSet<NodeId>,
     pub deleted: &'a DeletionOverlay,
     pub file_icons: &'a mut FileIconCache,
+    pub table: &'a mut TableState,
+}
+
+#[derive(Default)]
+pub struct TableState {
+    sort: Option<(TableColumn, bool)>,
+    child_orders: BTreeMap<NodeId, Arc<[usize]>>,
+}
+
+impl TableState {
+    fn begin_frame(&mut self, prefs: &AppPrefs) {
+        let sort = (prefs.sort_column, prefs.sort_descending);
+        if self.sort != Some(sort) {
+            self.child_orders.clear();
+            self.sort = Some(sort);
+        }
+    }
+
+    fn child_order(&mut self, node: &FileNode, prefs: &AppPrefs) -> Arc<[usize]> {
+        if let Some(order) = self.child_orders.get(&node.id) {
+            return Arc::clone(order);
+        }
+
+        let mut indices = (0..node.children.len()).collect::<Vec<_>>();
+        indices.sort_by(|&a, &b| compare_nodes(&node.children[a], &node.children[b], prefs));
+        let order = Arc::from(indices.into_boxed_slice());
+        self.child_orders.insert(node.id, Arc::clone(&order));
+        order
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -67,6 +97,7 @@ pub fn show(
         expanded,
         deleted,
         file_icons,
+        table,
     } = state;
 
     show_branding(ui);
@@ -86,13 +117,6 @@ pub fn show(
     };
 
     let mut command = None;
-    let mut rows = Vec::new();
-    collect_rows(&tree.root, None, 0, expanded, prefs, &mut rows);
-
-    let arrow_command = handle_keyboard(ui.ctx(), tree, pane, expanded, &rows);
-    if command.is_none() {
-        command = arrow_command;
-    }
 
     let frame = egui::Frame::new()
         .fill(frame_fill)
@@ -103,6 +127,16 @@ pub fn show(
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 show_header(ui, prefs, prefs_changed);
+                table.begin_frame(prefs);
+
+                let mut rows = Vec::new();
+                collect_rows(&tree.root, None, 0, expanded, prefs, table, &mut rows);
+
+                let arrow_command = handle_keyboard(ui.ctx(), tree, pane, expanded, &rows);
+                if command.is_none() {
+                    command = arrow_command;
+                }
+
                 let mut row_context = RowContext {
                     pane,
                     expanded,
@@ -558,6 +592,7 @@ fn collect_rows<'a>(
     depth: usize,
     expanded: &BTreeSet<NodeId>,
     prefs: &AppPrefs,
+    table: &mut TableState,
     rows: &mut Vec<RowInfo<'a>>,
 ) {
     rows.push(RowInfo {
@@ -577,15 +612,15 @@ fn collect_rows<'a>(
         return;
     }
 
-    let mut child_indices = (0..node.children.len()).collect::<Vec<_>>();
-    child_indices.sort_by(|&a, &b| compare_nodes(&node.children[a], &node.children[b], prefs));
-    for child_index in child_indices {
+    let child_indices = table.child_order(node, prefs);
+    for &child_index in child_indices.iter() {
         collect_rows(
             &node.children[child_index],
             Some(node.size),
             depth + 1,
             expanded,
             prefs,
+            table,
             rows,
         );
     }
@@ -610,37 +645,4 @@ fn compare_nodes(a: &FileNode, b: &FileNode, prefs: &AppPrefs) -> Ordering {
 
 fn natural_name_cmp(a: &str, b: &str) -> Ordering {
     a.to_lowercase().cmp(&b.to_lowercase())
-}
-
-fn format_count(count: u64) -> String {
-    let s = count.to_string();
-    let mut result = String::new();
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(ch);
-    }
-    result.chars().rev().collect()
-}
-
-fn format_modified(time: SystemTime) -> String {
-    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
-        return String::new();
-    };
-    let secs = duration.as_secs() as libc::time_t;
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let ptr = unsafe { libc::localtime_r(&secs, tm.as_mut_ptr()) };
-    if ptr.is_null() {
-        return String::new();
-    }
-    let tm = unsafe { tm.assume_init() };
-    let mut buf = [0i8; 32];
-    let fmt = c"%Y-%m-%d %H:%M";
-    let written = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &tm) };
-    if written == 0 {
-        return String::new();
-    }
-    let bytes = &buf[..written];
-    String::from_utf8_lossy(&bytes.iter().map(|&b| b as u8).collect::<Vec<_>>()).into_owned()
 }
