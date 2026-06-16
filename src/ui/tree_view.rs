@@ -8,11 +8,38 @@ use crate::format_size;
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::{AppPrefs, TableColumn};
 use crate::ui::file_icons::{self, FileIconCache};
-use crate::ui::{self, ActivePane, NodeCommand};
+use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
 
 const HEADER_H: f32 = 24.0;
 const ROW_H: f32 = 22.0;
 const RESIZE_W: f32 = 5.0;
+
+pub struct TreeViewState<'a> {
+    pub pane: &'a mut PaneState,
+    pub expanded: &'a mut BTreeSet<NodeId>,
+    pub deleted: &'a DeletionOverlay,
+    pub file_icons: &'a mut FileIconCache,
+}
+
+#[derive(Clone, Copy)]
+struct RowStyle {
+    frame_fill: Color32,
+    alt_row_color: Color32,
+}
+
+struct RowContext<'a> {
+    pane: &'a mut PaneState,
+    expanded: &'a mut BTreeSet<NodeId>,
+    deleted: &'a DeletionOverlay,
+    prefs: &'a AppPrefs,
+    file_icons: &'a mut FileIconCache,
+    style: RowStyle,
+}
+
+struct TextStyle {
+    font_id: egui::FontId,
+    color: Color32,
+}
 
 pub fn show_branding(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -31,16 +58,17 @@ pub fn show_branding(ui: &mut egui::Ui) {
 pub fn show(
     ui: &mut egui::Ui,
     tree: &FileTree,
-    selected: &mut Option<NodeId>,
-    hovered: &mut Option<NodeId>,
-    expanded: &mut BTreeSet<NodeId>,
-    deleted_nodes: &BTreeSet<NodeId>,
-    deleted_outlines: &BTreeSet<NodeId>,
-    active_pane: &mut ActivePane,
+    state: TreeViewState<'_>,
     prefs: &mut AppPrefs,
     prefs_changed: &mut bool,
-    file_icons: &mut FileIconCache,
 ) -> Option<NodeCommand> {
+    let TreeViewState {
+        pane,
+        expanded,
+        deleted,
+        file_icons,
+    } = state;
+
     show_branding(ui);
     ui.add_space(4.0);
 
@@ -61,7 +89,7 @@ pub fn show(
     let mut rows = Vec::new();
     collect_rows(&tree.root, None, 0, expanded, prefs, &mut rows);
 
-    let arrow_command = handle_keyboard(ui.ctx(), tree, selected, expanded, active_pane, &rows);
+    let arrow_command = handle_keyboard(ui.ctx(), tree, pane, expanded, &rows);
     if command.is_none() {
         command = arrow_command;
     }
@@ -75,22 +103,19 @@ pub fn show(
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 show_header(ui, prefs, prefs_changed);
-                for (row_index, row) in rows.iter().enumerate() {
-                    if let Some(cmd) = show_row(
-                        ui,
-                        row,
-                        row_index,
-                        selected,
-                        hovered,
-                        expanded,
-                        deleted_nodes,
-                        deleted_outlines,
-                        active_pane,
-                        prefs,
-                        file_icons,
+                let mut row_context = RowContext {
+                    pane,
+                    expanded,
+                    deleted,
+                    prefs,
+                    file_icons,
+                    style: RowStyle {
                         frame_fill,
                         alt_row_color,
-                    ) {
+                    },
+                };
+                for (row_index, row) in rows.iter().enumerate() {
+                    if let Some(cmd) = show_row(ui, row, row_index, &mut row_context) {
                         command = Some(cmd);
                     }
                 }
@@ -175,33 +200,24 @@ fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn show_row(
     ui: &mut egui::Ui,
     row: &RowInfo<'_>,
     row_index: usize,
-    selected: &mut Option<NodeId>,
-    hovered: &mut Option<NodeId>,
-    expanded: &mut BTreeSet<NodeId>,
-    deleted_nodes: &BTreeSet<NodeId>,
-    deleted_outlines: &BTreeSet<NodeId>,
-    active_pane: &mut ActivePane,
-    prefs: &AppPrefs,
-    file_icons: &mut FileIconCache,
-    frame_fill: Color32,
-    alt_row_color: Color32,
+    context: &mut RowContext<'_>,
 ) -> Option<NodeCommand> {
     let mut command = None;
-    let is_selected = *selected == Some(row.id);
+    let is_selected = context.pane.selected == Some(row.id);
     let bg = if is_selected {
         ui.visuals().selection.bg_fill
     } else if row_index % 2 == 1 {
-        alt_row_color
+        context.style.alt_row_color
     } else {
-        frame_fill
+        context.style.frame_fill
     };
 
-    let total_w = prefs
+    let total_w = context
+        .prefs
         .columns
         .iter()
         .map(|pref| pref.width + RESIZE_W)
@@ -212,35 +228,24 @@ fn show_row(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for pref in &prefs.columns {
+        for pref in &context.prefs.columns {
             let (rect, resp) = ui.allocate_exact_size(vec2(pref.width, ROW_H), Sense::click());
             let cell_resp = resp;
             if cell_resp.hovered() {
-                *hovered = Some(row.id);
+                context.pane.hovered = Some(row.id);
             }
             if cell_resp.clicked() {
-                *selected = Some(row.id);
-                *active_pane = ActivePane::Table;
+                context.pane.select(row.id, ActivePane::Table);
             }
             if cell_resp.double_clicked() {
                 command = Some(NodeCommand::Open(row.id));
             }
             cell_resp.context_menu(|ui| {
-                *selected = Some(row.id);
-                *active_pane = ActivePane::Table;
+                context.pane.select(row.id, ActivePane::Table);
                 ui::node_context_menu(ui, row.id, row.is_dir, "Zoom In Treemap", &mut command);
             });
-            let is_deleted = row_is_deleted(row.id, deleted_nodes, deleted_outlines);
-            paint_cell(
-                ui,
-                rect,
-                row,
-                pref.column,
-                expanded,
-                is_selected,
-                is_deleted,
-                file_icons,
-            );
+            let is_deleted = context.deleted.is_deleted(row.id);
+            paint_cell(ui, rect, row, pref.column, context, is_selected, is_deleted);
             ui.allocate_exact_size(vec2(RESIZE_W, ROW_H), Sense::hover());
         }
     });
@@ -252,10 +257,9 @@ fn paint_cell(
     rect: Rect,
     row: &RowInfo<'_>,
     column: TableColumn,
-    expanded: &mut BTreeSet<NodeId>,
+    context: &mut RowContext<'_>,
     is_selected: bool,
     is_deleted: bool,
-    file_icons: &mut FileIconCache,
 ) {
     let text_color = if is_deleted {
         Color32::from_rgb(230, 45, 45)
@@ -272,13 +276,13 @@ fn paint_cell(
                 let arrow_resp =
                     ui.interact(arrow_rect, Id::new(("expand", row.id)), Sense::click());
                 if arrow_resp.clicked() {
-                    if expanded.contains(&row.id) {
-                        expanded.remove(&row.id);
+                    if context.expanded.contains(&row.id) {
+                        context.expanded.remove(&row.id);
                     } else {
-                        expanded.insert(row.id);
+                        context.expanded.insert(row.id);
                     }
                 }
-                let glyph = if expanded.contains(&row.id) {
+                let glyph = if context.expanded.contains(&row.id) {
                     "▾"
                 } else {
                     "▸"
@@ -289,15 +293,21 @@ fn paint_cell(
                     arrow_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     glyph,
-                    egui::FontId::proportional(13.0),
-                    text_color,
+                    TextStyle {
+                        font_id: egui::FontId::proportional(13.0),
+                        color: text_color,
+                    },
                     is_deleted,
                 );
             }
             x += 16.0;
             let icon_rect =
                 Rect::from_center_size(pos2(x + 8.0, rect.center().y), vec2(16.0, 16.0));
-            if let Some(texture) = file_icons.texture_for(ui.ctx(), row.is_dir, row.display_name) {
+            if let Some(texture) =
+                context
+                    .file_icons
+                    .texture_for(ui.ctx(), row.is_dir, row.display_name)
+            {
                 ui.painter().image(
                     texture.id(),
                     icon_rect,
@@ -316,8 +326,10 @@ fn paint_cell(
                 pos2(x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 row.display_name,
-                egui::FontId::proportional(13.0),
-                text_color,
+                TextStyle {
+                    font_id: egui::FontId::proportional(13.0),
+                    color: text_color,
+                },
                 is_deleted,
             );
         }
@@ -369,8 +381,10 @@ fn paint_cell(
                 pos2(rect.left() + 6.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 &text,
-                egui::FontId::proportional(12.0),
-                text_color,
+                TextStyle {
+                    font_id: egui::FontId::proportional(12.0),
+                    color: text_color,
+                },
                 is_deleted,
             );
         }
@@ -384,8 +398,10 @@ fn paint_right(ui: &egui::Ui, rect: Rect, text: &str, color: Color32, strike: bo
         pos2(rect.right() - 6.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         text,
-        egui::FontId::proportional(12.0),
-        color,
+        TextStyle {
+            font_id: egui::FontId::proportional(12.0),
+            color,
+        },
         strike,
     );
 }
@@ -414,13 +430,14 @@ fn paint_text(
     pos: egui::Pos2,
     align: egui::Align2,
     text: &str,
-    font_id: egui::FontId,
-    color: Color32,
+    style: TextStyle,
     strike: bool,
 ) {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font_id, color);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), style.font_id, style.color);
     let text_rect = align.anchor_size(pos, galley.size());
-    ui.painter().galley(text_rect.min, galley, color);
+    ui.painter().galley(text_rect.min, galley, style.color);
 
     if strike && !text.is_empty() {
         let strike_rect = text_rect.intersect(cell_rect.shrink2(vec2(4.0, 0.0)));
@@ -434,23 +451,14 @@ fn paint_text(
     }
 }
 
-fn row_is_deleted(
-    id: NodeId,
-    deleted_nodes: &BTreeSet<NodeId>,
-    deleted_outlines: &BTreeSet<NodeId>,
-) -> bool {
-    deleted_nodes.contains(&id) || deleted_outlines.contains(&id)
-}
-
 fn handle_keyboard(
     ctx: &egui::Context,
     tree: &FileTree,
-    selected: &mut Option<NodeId>,
+    pane: &mut PaneState,
     expanded: &mut BTreeSet<NodeId>,
-    active_pane: &mut ActivePane,
     rows: &[RowInfo<'_>],
 ) -> Option<NodeCommand> {
-    if *active_pane != ActivePane::Table {
+    if pane.active_pane != ActivePane::Table {
         return None;
     }
     if rows.is_empty() {
@@ -459,7 +467,7 @@ fn handle_keyboard(
 
     let command = ctx.input(|i| {
         if i.key_pressed(egui::Key::Enter) {
-            selected.map(NodeCommand::Open)
+            pane.selected.map(NodeCommand::Open)
         } else {
             None
         }
@@ -487,24 +495,25 @@ fn handle_keyboard(
     });
 
     let key = key?;
-    let current = selected
+    let current = pane
+        .selected
         .and_then(|id| rows.iter().position(|row| row.id == id))
         .unwrap_or(0);
     match key {
         egui::Key::ArrowDown => {
-            *selected = Some(rows[(current + 1).min(rows.len() - 1)].id);
+            pane.selected = Some(rows[(current + 1).min(rows.len() - 1)].id);
         }
         egui::Key::ArrowUp => {
-            *selected = Some(rows[current.saturating_sub(1)].id);
+            pane.selected = Some(rows[current.saturating_sub(1)].id);
         }
         egui::Key::Home => {
-            *selected = Some(rows[0].id);
+            pane.selected = Some(rows[0].id);
         }
         egui::Key::End => {
-            *selected = Some(rows[rows.len() - 1].id);
+            pane.selected = Some(rows[rows.len() - 1].id);
         }
         egui::Key::ArrowRight => {
-            if let Some(id) = *selected
+            if let Some(id) = pane.selected
                 && let Some(node) = tree.root.resolve_id(id)
                 && node.is_dir
                 && !node.children.is_empty()
@@ -513,7 +522,7 @@ fn handle_keyboard(
             }
         }
         egui::Key::ArrowLeft => {
-            if let Some(id) = *selected {
+            if let Some(id) = pane.selected {
                 if expanded.remove(&id) {
                     return None;
                 }
@@ -521,7 +530,7 @@ fn handle_keyboard(
                     && let Some(parent_path) = path.split_last().map(|(_, parent)| parent)
                     && let Some(parent) = tree.root.resolve_path(parent_path)
                 {
-                    *selected = Some(parent.id);
+                    pane.selected = Some(parent.id);
                 }
             }
         }

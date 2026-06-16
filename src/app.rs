@@ -9,7 +9,7 @@ use crate::model::color::ColorMap;
 use crate::model::tree::{FileTree, NodeId};
 use crate::settings::{AppPrefs, SplitOrientation};
 use crate::ui::file_icons::FileIconCache;
-use crate::ui::{self, ActivePane, NodeCommand};
+use crate::ui::{self, NodeCommand};
 
 pub struct App {
     state: AppState,
@@ -28,19 +28,12 @@ enum AppState {
 struct LoadedState {
     tree: FileTree,
     color_map: ColorMap,
-    selected: Option<NodeId>,
-    hovered: Option<NodeId>,
+    pane: ui::PaneState,
     expanded: BTreeSet<NodeId>,
-    deleted_nodes: BTreeSet<NodeId>,
-    deleted_outlines: BTreeSet<NodeId>,
-    treemap_root: NodeId,
-    zoom_history: Vec<NodeId>,
-    active_pane: ActivePane,
+    deleted: ui::DeletionOverlay,
+    treemap: ui::treemap_view::TreemapState,
     status_message: Option<String>,
     scan_time_ms: f64,
-    cached_layout_rect: Option<egui::Rect>,
-    treemap_cache: ui::treemap_view::TreemapCache,
-    treemap_texture: Option<egui::TextureHandle>,
     pending_scan: Option<PathBuf>,
     file_icons: FileIconCache,
 }
@@ -117,23 +110,16 @@ impl eframe::App for App {
             let color_map = ColorMap::from_extensions(&tree.extensions);
             let mut expanded = BTreeSet::new();
             expanded.insert(tree.root.id);
-            let treemap_root = tree.root.id;
+            let treemap = ui::treemap_view::TreemapState::new(tree.root.id);
             self.state = AppState::Loaded(Box::new(LoadedState {
                 tree,
                 color_map,
-                selected: None,
-                hovered: None,
+                pane: ui::PaneState::default(),
                 expanded,
-                deleted_nodes: BTreeSet::new(),
-                deleted_outlines: BTreeSet::new(),
-                treemap_root,
-                zoom_history: Vec::new(),
-                active_pane: ActivePane::Table,
+                deleted: ui::DeletionOverlay::default(),
+                treemap,
                 status_message: None,
                 scan_time_ms,
-                cached_layout_rect: None,
-                treemap_cache: ui::treemap_view::TreemapCache::default(),
-                treemap_texture: None,
                 pending_scan: None,
                 file_icons: FileIconCache::default(),
             }));
@@ -166,7 +152,7 @@ impl eframe::App for App {
                 });
             }
             AppState::Loaded(loaded) => {
-                loaded.hovered = None;
+                loaded.pane.hovered = None;
                 let mut command = handle_delete(loaded, ctx);
                 if let Some(ui_command) =
                     loaded
@@ -248,7 +234,7 @@ impl LoadedState {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let has_selection = self.selected.is_some();
+                    let has_selection = self.pane.selected.is_some();
 
                     let trash_text = egui::RichText::new("\u{1F5D1}").color(if has_selection {
                         egui::Color32::from_rgb(220, 60, 60)
@@ -257,7 +243,7 @@ impl LoadedState {
                     });
                     let trash_btn = ui.add_enabled(has_selection, egui::Button::new(trash_text));
                     if trash_btn.clicked()
-                        && let Some(id) = self.selected
+                        && let Some(id) = self.pane.selected
                     {
                         *command = Some(NodeCommand::Delete { id, confirm: true });
                     }
@@ -267,7 +253,7 @@ impl LoadedState {
                         egui::Button::new("\u{1F50D} Reveal in Finder"),
                     );
                     if reveal_btn.clicked()
-                        && let Some(id) = self.selected
+                        && let Some(id) = self.pane.selected
                     {
                         *command = Some(NodeCommand::Reveal(id));
                     }
@@ -304,9 +290,7 @@ impl LoadedState {
                     {
                         prefs.treemap_folder_depth = folder_depth as usize;
                         *prefs_changed = true;
-                        self.cached_layout_rect = None;
-                        self.treemap_cache.clear();
-                        self.treemap_texture = None;
+                        self.treemap.clear_layout();
                     }
                 });
             });
@@ -382,15 +366,14 @@ impl LoadedState {
         ui::tree_view::show(
             ui,
             &self.tree,
-            &mut self.selected,
-            &mut self.hovered,
-            &mut self.expanded,
-            &self.deleted_nodes,
-            &self.deleted_outlines,
-            &mut self.active_pane,
+            ui::tree_view::TreeViewState {
+                pane: &mut self.pane,
+                expanded: &mut self.expanded,
+                deleted: &self.deleted,
+                file_icons: &mut self.file_icons,
+            },
             prefs,
             prefs_changed,
-            &mut self.file_icons,
         )
     }
 
@@ -398,17 +381,11 @@ impl LoadedState {
         ui::treemap_view::show(
             ui,
             &mut self.tree,
-            self.treemap_root,
-            &mut self.selected,
-            &mut self.hovered,
-            &mut self.active_pane,
+            &mut self.pane,
             &self.color_map,
-            &self.deleted_nodes,
-            &self.deleted_outlines,
+            &self.deleted,
             prefs,
-            &mut self.cached_layout_rect,
-            &mut self.treemap_cache,
-            &mut self.treemap_texture,
+            &mut self.treemap,
         )
     }
 
@@ -422,8 +399,9 @@ impl LoadedState {
     }
 
     fn status_path(&self) -> Option<String> {
-        self.hovered
-            .or(self.selected)
+        self.pane
+            .hovered
+            .or(self.pane.selected)
             .and_then(|id| self.tree.full_display_path_for_id(id))
     }
 
@@ -543,7 +521,7 @@ impl DeleteTarget {
 /// Handle Delete/Backspace when something is selected.
 /// Shift+Delete bypasses confirmation; Delete alone confirms.
 fn handle_delete(loaded: &mut LoadedState, ctx: &egui::Context) -> Option<NodeCommand> {
-    let id = loaded.selected?;
+    let id = loaded.pane.selected?;
     let delete = ctx.input(|i| {
         let del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
         del.then_some(!i.modifiers.shift)
@@ -604,46 +582,40 @@ fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
         loaded.status_message = Some("Cannot zoom into a file".to_owned());
         return;
     }
-    if loaded.treemap_root == id {
+    if loaded.treemap.root_id == id {
         return;
     }
-    if node_contains_id(&loaded.tree, loaded.treemap_root, id) {
-        loaded.zoom_history.push(loaded.treemap_root);
+    if node_contains_id(&loaded.tree, loaded.treemap.root_id, id) {
+        loaded.treemap.zoom_history.push(loaded.treemap.root_id);
     } else {
-        loaded.zoom_history.clear();
+        loaded.treemap.zoom_history.clear();
         if loaded.tree.root.id != id {
-            loaded.zoom_history.push(loaded.tree.root.id);
+            loaded.treemap.zoom_history.push(loaded.tree.root.id);
         }
     }
-    loaded.treemap_root = id;
-    loaded.selected = Some(id);
-    loaded.cached_layout_rect = None;
-    loaded.treemap_cache.clear();
-    loaded.treemap_texture = None;
+    loaded.treemap.root_id = id;
+    loaded.pane.selected = Some(id);
+    loaded.treemap.clear_layout();
 }
 
 fn zoom_out_treemap(loaded: &mut LoadedState) {
-    if let Some(previous) = loaded.zoom_history.pop()
+    if let Some(previous) = loaded.treemap.zoom_history.pop()
         && loaded.tree.root.resolve_id(previous).is_some()
     {
-        loaded.treemap_root = previous;
-        loaded.selected = Some(previous);
-        loaded.cached_layout_rect = None;
-        loaded.treemap_cache.clear();
-        loaded.treemap_texture = None;
+        loaded.treemap.root_id = previous;
+        loaded.pane.selected = Some(previous);
+        loaded.treemap.clear_layout();
         return;
     }
 
-    if let Some(parent_id) = parent_id_for_node(&loaded.tree, loaded.treemap_root) {
-        loaded.treemap_root = parent_id;
-        loaded.selected = Some(parent_id);
-        loaded.cached_layout_rect = None;
-        loaded.treemap_cache.clear();
-        loaded.treemap_texture = None;
+    if let Some(parent_id) = parent_id_for_node(&loaded.tree, loaded.treemap.root_id) {
+        loaded.treemap.root_id = parent_id;
+        loaded.pane.selected = Some(parent_id);
+        loaded.treemap.clear_layout();
         return;
     }
 
-    if let Some(path) = loaded.tree.build_fs_path_for_id(loaded.treemap_root)
+    if let Some(path) = loaded.tree.build_fs_path_for_id(loaded.treemap.root_id)
         && let Some(parent) = path.parent()
         && parent != path
     {
@@ -671,15 +643,15 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
     };
     match result {
         Ok(()) => {
-            loaded.deleted_nodes.insert(target.id);
+            loaded.deleted.insert_node(target.id);
             if let Some(node) = loaded.tree.root.resolve_id(target.id) {
-                let before = loaded.deleted_outlines.len();
-                collect_deleted_outline_ids(node, &mut loaded.deleted_outlines);
-                if loaded.deleted_outlines.len() == before {
-                    loaded.deleted_outlines.insert(target.id);
+                let before = loaded.deleted.outline_count();
+                collect_deleted_outline_ids(node, &mut loaded.deleted);
+                if loaded.deleted.outline_count() == before {
+                    loaded.deleted.insert_outline(target.id);
                 }
             }
-            loaded.hovered = None;
+            loaded.pane.hovered = None;
             loaded.status_message = Some(format!("Deleted {}", target.name()));
         }
         Err(e) => {
@@ -690,14 +662,14 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
 
 fn collect_deleted_outline_ids(
     node: &crate::model::tree::FileNode,
-    outlines: &mut BTreeSet<NodeId>,
+    deleted: &mut ui::DeletionOverlay,
 ) {
     if node.is_dir {
         for child in node.children.iter() {
-            collect_deleted_outline_ids(child, outlines);
+            collect_deleted_outline_ids(child, deleted);
         }
     } else {
-        outlines.insert(node.id);
+        deleted.insert_outline(node.id);
     }
 }
 

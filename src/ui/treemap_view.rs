@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2};
 use treemap::{Mappable, TreemapLayout};
 
@@ -7,7 +5,7 @@ use crate::format_size;
 use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::AppPrefs;
-use crate::ui::{self, ActivePane, NodeCommand};
+use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
 
 /// Cushion surface coefficients: [a_x, a_y, c_x, c_y]
 /// z(x,y) = a_x*x^2 + a_y*y^2 + c_x*x + c_y*y
@@ -58,6 +56,32 @@ impl TreemapCache {
     }
 }
 
+pub struct TreemapState {
+    pub root_id: NodeId,
+    pub zoom_history: Vec<NodeId>,
+    cached_layout_rect: Option<Rect>,
+    cache: TreemapCache,
+    texture: Option<TextureHandle>,
+}
+
+impl TreemapState {
+    pub fn new(root_id: NodeId) -> Self {
+        Self {
+            root_id,
+            zoom_history: Vec::new(),
+            cached_layout_rect: None,
+            cache: TreemapCache::default(),
+            texture: None,
+        }
+    }
+
+    pub fn clear_layout(&mut self) {
+        self.cached_layout_rect = None;
+        self.cache.clear();
+        self.texture = None;
+    }
+}
+
 struct HitNode<'a> {
     node: &'a FileNode,
     path: Vec<usize>,
@@ -99,17 +123,11 @@ impl Mappable for LayoutItem {
 pub fn show(
     ui: &mut egui::Ui,
     tree: &mut FileTree,
-    treemap_root_id: NodeId,
-    selected: &mut Option<NodeId>,
-    hovered: &mut Option<NodeId>,
-    active_pane: &mut ActivePane,
+    pane: &mut PaneState,
     color_map: &ColorMap,
-    deleted_nodes: &BTreeSet<NodeId>,
-    deleted_outlines: &BTreeSet<NodeId>,
+    deleted: &DeletionOverlay,
     prefs: &AppPrefs,
-    cached_layout_rect: &mut Option<Rect>,
-    treemap_cache: &mut TreemapCache,
-    treemap_texture: &mut Option<TextureHandle>,
+    state: &mut TreemapState,
 ) -> Option<NodeCommand> {
     let mut command = None;
     let available = ui.available_size();
@@ -122,8 +140,8 @@ pub fn show(
 
     let w = canvas.width();
     let h = canvas.height();
-    let display_root_id = if tree.root.resolve_id(treemap_root_id).is_some() {
-        treemap_root_id
+    let display_root_id = if tree.root.resolve_id(state.root_id).is_some() {
+        state.root_id
     } else {
         tree.root.id
     };
@@ -131,7 +149,7 @@ pub fn show(
     // Check if we need to re-layout and re-render the cushion texture.
     // Compare the full canvas rect (position + size) so that side panel
     // resizing or window moves trigger a re-layout.
-    let needs_update = if let Some(cached) = *cached_layout_rect {
+    let needs_update = if let Some(cached) = state.cached_layout_rect {
         (canvas.left() - cached.left()).abs() > 1.0
             || (canvas.top() - cached.top()).abs() > 1.0
             || (w - cached.width()).abs() > 1.0
@@ -157,7 +175,7 @@ pub fn show(
         let surface = [0.0f64; 4];
         let display_root_path = tree.root.path_to_id(display_root_id).unwrap_or_default();
         if let Some(root) = tree.root.resolve_id(display_root_id) {
-            treemap_cache.rebuild(root, display_root_path);
+            state.cache.rebuild(root, display_root_path);
             collect_cushion_leaves(root, surface, CUSHION_HEIGHT, true, color_map, &mut leaves);
         }
 
@@ -169,10 +187,10 @@ pub fn show(
             let texture = ui
                 .ctx()
                 .load_texture("treemap_cushion", image, TextureOptions::NEAREST);
-            *treemap_texture = Some(texture);
+            state.texture = Some(texture);
         }
 
-        *cached_layout_rect = Some(canvas);
+        state.cached_layout_rect = Some(canvas);
     }
 
     let Some(display_root) = tree.root.resolve_id(display_root_id) else {
@@ -182,7 +200,7 @@ pub fn show(
     paint_folder_backgrounds(&painter, display_root, 0, prefs);
 
     // Paint the cached file-cushion texture over transparent folder content.
-    if let Some(tex) = treemap_texture {
+    if let Some(tex) = &state.texture {
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         painter.image(tex.id(), canvas, uv, Color32::WHITE);
     }
@@ -192,10 +210,9 @@ pub fn show(
         && let Some(pos) = response.interact_pointer_pos()
     {
         if let Some(hit) = find_node_at(display_root, pos) {
-            *selected = Some(hit.node.id);
-            *active_pane = ActivePane::Treemap;
+            pane.select(hit.node.id, ActivePane::Treemap);
         } else {
-            *selected = None;
+            pane.selected = None;
         }
     }
 
@@ -216,8 +233,7 @@ pub fn show(
         });
 
         if let Some(id) = target {
-            *selected = Some(id);
-            *active_pane = ActivePane::Treemap;
+            pane.select(id, ActivePane::Treemap);
         }
     }
 
@@ -237,8 +253,8 @@ pub fn show(
         && let Some(pos) = response.hover_pos()
         && let Some(hit) = find_node_at(display_root, pos)
     {
-        *hovered = Some(hit.node.id);
-        let tree_path = treemap_cache.tree_path_for_hit(&hit);
+        pane.hovered = Some(hit.node.id);
+        let tree_path = state.cache.tree_path_for_hit(&hit);
         let full_path = tree
             .build_fs_path(&tree_path)
             .map(|path| path.display().to_string())
@@ -250,11 +266,11 @@ pub fn show(
         });
     }
 
-    paint_folder_labels_and_borders(&painter, display_root, 0, prefs, deleted_nodes);
+    paint_folder_labels_and_borders(&painter, display_root, 0, prefs, deleted);
     paint_file_labels(&painter, display_root, 0, prefs);
 
-    if let Some(hover_id) = *hovered
-        && let Some(r) = treemap_cache.rect(hover_id)
+    if let Some(hover_id) = pane.hovered
+        && let Some(r) = state.cache.rect(hover_id)
     {
         painter.rect_stroke(
             r,
@@ -265,8 +281,8 @@ pub fn show(
     }
 
     // Draw selection highlight
-    if let Some(sel_id) = selected
-        && let Some(r) = treemap_cache.rect(*sel_id)
+    if let Some(sel_id) = pane.selected
+        && let Some(r) = state.cache.rect(sel_id)
     {
         painter.rect_stroke(
             r,
@@ -276,7 +292,7 @@ pub fn show(
         );
     }
 
-    paint_deleted_outlines(&painter, treemap_cache, deleted_outlines);
+    paint_deleted_outlines(&painter, &state.cache, deleted);
 
     command
 }
@@ -528,7 +544,7 @@ fn paint_folder_labels_and_borders(
     node: &FileNode,
     depth: usize,
     prefs: &AppPrefs,
-    deleted_nodes: &BTreeSet<NodeId>,
+    deleted: &DeletionOverlay,
 ) {
     if !node.is_dir {
         return;
@@ -545,7 +561,7 @@ fn paint_folder_labels_and_borders(
                 egui::Align2::LEFT_CENTER,
                 label,
                 egui::FontId::monospace(8.0),
-                if deleted_nodes.contains(&node.id) {
+                if deleted.is_node_deleted(node.id) {
                     Color32::from_rgb(255, 70, 70)
                 } else {
                     Color32::from_rgb(235, 235, 235)
@@ -561,7 +577,7 @@ fn paint_folder_labels_and_borders(
     }
 
     for child in node.children.iter() {
-        paint_folder_labels_and_borders(painter, child, depth + 1, prefs, deleted_nodes);
+        paint_folder_labels_and_borders(painter, child, depth + 1, prefs, deleted);
     }
 }
 
@@ -606,10 +622,10 @@ fn paint_file_labels(painter: &egui::Painter, node: &FileNode, depth: usize, pre
 fn paint_deleted_outlines(
     painter: &egui::Painter,
     cache: &TreemapCache,
-    deleted_outlines: &BTreeSet<NodeId>,
+    deleted: &DeletionOverlay,
 ) {
-    for id in deleted_outlines {
-        let Some(rect) = cache.rect(*id) else {
+    for id in deleted.outline_ids() {
+        let Some(rect) = cache.rect(id) else {
             continue;
         };
         painter.rect_stroke(
