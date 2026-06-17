@@ -64,6 +64,6 @@ pub fn format_modified(time: SystemTime) -> String {
     if written == 0 {
         return String::new();
     }
-    let bytes = &buf[..written];
-    String::from_utf8_lossy(&bytes.iter().map(|&b| b as u8).collect::<Vec<_>>()).into_owned()
+    let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, written) };
+    String::from_utf8_lossy(bytes).into_owned()
 }

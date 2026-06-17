@@ -2,7 +2,7 @@ pub mod file_icons;
 pub mod tree_view;
 pub mod treemap_view;
 
-use std::collections::BTreeSet;
+use std::ops::Range;
 
 use crate::model::tree::{FileNode, NodeId};
 
@@ -48,40 +48,25 @@ impl PaneState {
 
 #[derive(Default)]
 pub struct DeletionOverlay {
-    nodes: BTreeSet<NodeId>,
-    outlines: BTreeSet<NodeId>,
+    ranges: Vec<Range<NodeId>>,
 }
 
 impl DeletionOverlay {
     pub fn mark_deleted(&mut self, node: &FileNode) {
-        self.nodes.insert(node.id);
-        let before = self.outlines.len();
-        self.collect_outline_ids(node);
-        if self.outlines.len() == before {
-            self.outlines.insert(node.id);
-        }
+        self.ranges
+            .push(node.id..node.id.saturating_add(node.subtree_node_count()));
     }
 
     pub fn outline_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.outlines.iter().copied()
+        self.ranges.iter().map(|range| range.start)
     }
 
     pub fn is_node_deleted(&self, id: NodeId) -> bool {
-        self.nodes.contains(&id)
+        self.ranges.iter().any(|range| range.contains(&id))
     }
 
     pub fn is_deleted(&self, id: NodeId) -> bool {
-        self.is_node_deleted(id) || self.outlines.contains(&id)
-    }
-
-    fn collect_outline_ids(&mut self, node: &FileNode) {
-        if node.is_dir {
-            for child in node.children.iter() {
-                self.collect_outline_ids(child);
-            }
-        } else {
-            self.outlines.insert(node.id);
-        }
+        self.is_node_deleted(id)
     }
 }
 
@@ -127,5 +112,55 @@ pub(crate) fn node_context_menu(
     if ui.button("Delete").clicked() {
         *command = Some(NodeCommand::Delete { id, confirm: true });
         ui.close_menu();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(id: NodeId, name: &str, size: u64) -> FileNode {
+        FileNode {
+            id,
+            name: name.into(),
+            source_path: None,
+            size,
+            is_dir: false,
+            children: Box::new([]),
+            modified: None,
+            file_count: 1,
+            dir_count: 0,
+        }
+    }
+
+    fn dir(id: NodeId, name: &str, children: Vec<FileNode>) -> FileNode {
+        let size = children.iter().map(|child| child.size).sum();
+        let file_count = children.iter().map(|child| child.file_count).sum();
+        let dir_count = 1 + children.iter().map(|child| child.dir_count).sum::<u64>();
+        FileNode {
+            id,
+            name: name.into(),
+            source_path: None,
+            size,
+            is_dir: true,
+            children: children.into(),
+            modified: None,
+            file_count,
+            dir_count,
+        }
+    }
+
+    #[test]
+    fn deletion_overlay_marks_subtree_range() {
+        let node = dir(2, "folder", vec![file(3, "nested.txt", 10)]);
+        let mut deleted = DeletionOverlay::default();
+
+        deleted.mark_deleted(&node);
+
+        assert_eq!(deleted.outline_ids().collect::<Vec<_>>(), vec![2]);
+        assert!(deleted.is_deleted(2));
+        assert!(deleted.is_deleted(3));
+        assert!(!deleted.is_deleted(1));
+        assert!(!deleted.is_deleted(4));
     }
 }

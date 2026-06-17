@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use egui::{Color32, Id, Rect, Sense, Stroke, pos2, vec2};
@@ -27,7 +27,7 @@ pub struct TreeViewState<'a> {
 #[derive(Default)]
 pub struct TableState {
     sort: Option<(TableColumn, bool)>,
-    child_orders: BTreeMap<NodeId, Arc<[usize]>>,
+    child_orders: BTreeMap<NodeId, Rc<[usize]>>,
 }
 
 impl TableState {
@@ -39,15 +39,15 @@ impl TableState {
         }
     }
 
-    fn child_order(&mut self, node: &FileNode, prefs: &AppPrefs) -> Arc<[usize]> {
+    fn child_order(&mut self, node: &FileNode, prefs: &AppPrefs) -> Rc<[usize]> {
         if let Some(order) = self.child_orders.get(&node.id) {
-            return Arc::clone(order);
+            return Rc::clone(order);
         }
 
         let mut indices = (0..node.children.len()).collect::<Vec<_>>();
         indices.sort_by(|&a, &b| compare_nodes(&node.children[a], &node.children[b], prefs));
-        let order = Arc::from(indices.into_boxed_slice());
-        self.child_orders.insert(node.id, Arc::clone(&order));
+        let order = Rc::from(indices.into_boxed_slice());
+        self.child_orders.insert(node.id, Rc::clone(&order));
         order
     }
 }
@@ -547,7 +547,7 @@ fn handle_keyboard(
         }
         egui::Key::ArrowRight => {
             if let Some(id) = pane.selected
-                && let Some(node) = tree.root.resolve_id(id)
+                && let Some(node) = tree.node(id)
                 && node.is_dir
                 && !node.children.is_empty()
             {
@@ -559,11 +559,8 @@ fn handle_keyboard(
                 if expanded.remove(&id) {
                     return None;
                 }
-                if let Some(path) = tree.root.path_to_id(id)
-                    && let Some(parent_path) = path.split_last().map(|(_, parent)| parent)
-                    && let Some(parent) = tree.root.resolve_path(parent_path)
-                {
-                    pane.selected = Some(parent.id);
+                if let Some(parent_id) = tree.parent_id(id) {
+                    pane.selected = Some(parent_id);
                 }
             }
         }

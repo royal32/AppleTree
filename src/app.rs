@@ -225,10 +225,6 @@ impl ScanScopeState {
     fn has_checked_custom(&self) -> bool {
         self.items.iter().any(|item| item.custom && item.checked)
     }
-
-    fn selected_space(&self) -> ScopeSpace {
-        selected_scope_space(&self.checked_paths())
-    }
 }
 
 fn selected_scope_space(paths: &[PathBuf]) -> ScopeSpace {
@@ -257,7 +253,7 @@ fn path_space(path: &Path) -> Option<(String, u64, u64)> {
         return None;
     }
 
-    let block_size = stats.f_bsize.max(0) as u64;
+    let block_size = stats.f_bsize as u64;
     let total = (stats.f_blocks as u64).saturating_mul(block_size);
     let free = (stats.f_bavail as u64).saturating_mul(block_size);
     let mount = unsafe { CStr::from_ptr(stats.f_mntonname.as_ptr()) }
@@ -622,18 +618,8 @@ impl LoadedState {
         prefs_changed: &mut bool,
         enabled: bool,
     ) -> Option<NodeCommand> {
-        let mut command = None;
         self.show_status_bar(ctx, prefs, prefs_changed, enabled);
-        self.show_main_layout(
-            ctx,
-            prefs,
-            scope,
-            scope_logo,
-            prefs_changed,
-            &mut command,
-            enabled,
-        );
-        command
+        self.show_main_layout(ctx, prefs, scope, scope_logo, prefs_changed, enabled)
     }
 
     fn show_status_bar(
@@ -727,9 +713,9 @@ impl LoadedState {
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
-        command: &mut Option<NodeCommand>,
         enabled: bool,
-    ) {
+    ) -> Option<NodeCommand> {
+        let mut command = None;
         match prefs.split_orientation {
             SplitOrientation::LeftRight => {
                 egui::SidePanel::left("file_table")
@@ -752,7 +738,7 @@ impl LoadedState {
                             SplitOrientation::LeftRight,
                             prefs_changed,
                         ) {
-                            *command = Some(cmd);
+                            command = Some(cmd);
                         }
                     });
 
@@ -761,7 +747,7 @@ impl LoadedState {
                         ui.disable();
                     }
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
-                        *command = Some(cmd);
+                        command = Some(cmd);
                     }
                 });
             }
@@ -786,7 +772,7 @@ impl LoadedState {
                             SplitOrientation::TopBottom,
                             prefs_changed,
                         ) {
-                            *command = Some(cmd);
+                            command = Some(cmd);
                         }
                     });
                 let new_height = table_response.response.rect.height();
@@ -800,11 +786,12 @@ impl LoadedState {
                         ui.disable();
                     }
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
-                        *command = Some(cmd);
+                        command = Some(cmd);
                     }
                 });
             }
         }
+        command
     }
 
     fn show_file_table(
@@ -1194,9 +1181,10 @@ fn show_table_scope_column(
             let scope_height = if available_h
                 >= FILE_TABLE_MIN_HEIGHT + SCOPE_PANEL_GAP + LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT
             {
-                (available_h - FILE_TABLE_MIN_HEIGHT - SCOPE_PANEL_GAP)
-                    .min(LEFT_RIGHT_SCOPE_PANEL_HEIGHT)
-                    .max(LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT)
+                (available_h - FILE_TABLE_MIN_HEIGHT - SCOPE_PANEL_GAP).clamp(
+                    LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT,
+                    LEFT_RIGHT_SCOPE_PANEL_HEIGHT,
+                )
             } else {
                 (available_h * 0.42).max(0.0)
             };
@@ -1295,6 +1283,7 @@ fn show_scope_panel(
     });
 
     ui.add_space(6.0);
+    let mut checked_paths = Vec::new();
     ui.horizontal(|ui| {
         if ui.button("Browse...").clicked()
             && let Some(path) = pick_folder()
@@ -1309,18 +1298,18 @@ fn show_scope_panel(
             scope.remove_checked_custom();
         }
 
-        let checked_paths = scope.checked_paths();
+        checked_paths = scope.checked_paths();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(!checked_paths.is_empty(), egui::Button::new("Scan"))
                 .clicked()
             {
-                scan_request = Some(checked_paths);
+                scan_request = Some(checked_paths.clone());
             }
         });
     });
 
-    let space = scope.selected_space();
+    let space = selected_scope_space(&checked_paths);
     ui.add_space(4.0);
     ui.small(format!("Total: {}", format_size(space.total)));
     ui.small(format!("Used: {}", format_size(space.used)));
@@ -1340,9 +1329,8 @@ struct DeleteTarget {
 impl DeleteTarget {
     /// Resolve the selected node into a DeleteTarget, or None if the path is invalid.
     fn from_id(tree: &FileTree, id: NodeId) -> Option<Self> {
-        let sel_path = tree.root.path_to_id(id)?;
-        let fs_path = tree.build_fs_path(&sel_path)?;
-        let node = tree.root.resolve_path(&sel_path)?;
+        let fs_path = tree.build_fs_path_for_id(id)?;
+        let node = tree.node(id)?;
         Some(Self {
             id,
             fs_path,
@@ -1418,7 +1406,7 @@ fn execute_node_command(loaded: &mut LoadedState, ctx: &egui::Context, command: 
 }
 
 fn toggle_treemap_shrink(loaded: &mut LoadedState, id: NodeId) {
-    let Some(node) = loaded.tree.root.resolve_id(id) else {
+    let Some(node) = loaded.tree.node(id) else {
         loaded.status_message = Some("Cannot shrink: item no longer exists".to_owned());
         return;
     };
@@ -1433,7 +1421,7 @@ fn toggle_treemap_shrink(loaded: &mut LoadedState, id: NodeId) {
 }
 
 fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
-    let Some(node) = loaded.tree.root.resolve_id(id) else {
+    let Some(node) = loaded.tree.node(id) else {
         loaded.status_message = Some("Cannot zoom: item no longer exists".to_owned());
         return;
     };
@@ -1444,7 +1432,7 @@ fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
     if loaded.treemap.root_id == id {
         return;
     }
-    if node_contains_id(&loaded.tree, loaded.treemap.root_id, id) {
+    if loaded.tree.contains(loaded.treemap.root_id, id) {
         loaded.treemap.zoom_history.push(loaded.treemap.root_id);
     } else {
         loaded.treemap.zoom_history.clear();
@@ -1460,7 +1448,7 @@ fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
 
 fn zoom_out_treemap(loaded: &mut LoadedState) {
     if let Some(previous) = loaded.treemap.zoom_history.pop()
-        && loaded.tree.root.resolve_id(previous).is_some()
+        && loaded.tree.node(previous).is_some()
     {
         loaded.treemap.root_id = previous;
         loaded.pane.selected = Some(previous);
@@ -1469,7 +1457,7 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
         return;
     }
 
-    if let Some(parent_id) = parent_id_for_node(&loaded.tree, loaded.treemap.root_id) {
+    if let Some(parent_id) = loaded.tree.parent_id(loaded.treemap.root_id) {
         loaded.treemap.root_id = parent_id;
         loaded.pane.selected = Some(parent_id);
         loaded.treemap.clear_layout();
@@ -1485,18 +1473,6 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
     }
 }
 
-fn parent_id_for_node(tree: &FileTree, id: NodeId) -> Option<NodeId> {
-    let path = tree.root.path_to_id(id)?;
-    let (_, parent_path) = path.split_last()?;
-    tree.root.resolve_path(parent_path).map(|node| node.id)
-}
-
-fn node_contains_id(tree: &FileTree, root_id: NodeId, descendant_id: NodeId) -> bool {
-    tree.root
-        .resolve_id(root_id)
-        .is_some_and(|root| root.resolve_id(descendant_id).is_some())
-}
-
 fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
     let result = if target.is_dir {
         std::fs::remove_dir_all(&target.fs_path)
@@ -1505,7 +1481,7 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
     };
     match result {
         Ok(()) => {
-            if let Some(node) = loaded.tree.root.resolve_id(target.id) {
+            if let Some(node) = loaded.tree.node(target.id) {
                 loaded.deleted.mark_deleted(node);
             }
             loaded.pane.hovered = None;

@@ -1,8 +1,6 @@
-use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::scan::getattrlistbulk::{self, DirEntry};
@@ -10,18 +8,19 @@ use crate::scan::getattrlistbulk::{self, DirEntry};
 /// Stable scan-local identity for a node.
 pub type NodeId = u64;
 
-/// Index path from root to a node in the tree (e.g. [2, 0, 1] = root's 3rd child → 1st child → 2nd child).
+/// Index path from root to a node in the tree (e.g. [2, 0, 1] = root's 3rd child -> 1st child -> 2nd child).
 pub type TreePath = Vec<usize>;
-
-thread_local! {
-    static LOCAL_EXT_MAP: RefCell<HashMap<Box<str>, u64>> = RefCell::new(HashMap::new());
-}
 
 fn raw_extension(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((_, ext)) if !ext.is_empty() => ext,
         _ => "",
     }
+}
+
+fn extension_key(name: &str) -> &str {
+    let ext = raw_extension(name);
+    if ext.is_empty() { "(no ext)" } else { ext }
 }
 
 /// A node in the file tree. Uses compact representation (Box<str> + Box<[T]>).
@@ -42,6 +41,14 @@ pub struct FileNode {
 }
 
 impl FileNode {
+    pub fn subtree_node_count(&self) -> u64 {
+        self.file_count + self.dir_count
+    }
+
+    pub fn contains_id(&self, id: NodeId) -> bool {
+        id >= self.id && id < self.subtree_end()
+    }
+
     /// Get the file extension, or empty string for dirs/extensionless files.
     pub fn extension(&self) -> &str {
         if self.is_dir {
@@ -64,35 +71,40 @@ impl FileNode {
         if self.id == id {
             return Some(self);
         }
-        for child in self.children.iter() {
-            if let Some(node) = child.resolve_id(id) {
-                return Some(node);
-            }
-        }
-        None
+        let child = self.child_containing_id(id)?;
+        child.resolve_id(id)
     }
 
     pub fn path_to_id(&self, id: NodeId) -> Option<TreePath> {
-        let mut path = Vec::new();
-        if self.find_path_to_id(id, &mut path) {
-            Some(path)
-        } else {
-            None
+        if !self.contains_id(id) {
+            return None;
         }
+        let mut path = Vec::new();
+        let mut node = self;
+        while node.id != id {
+            let idx = node.child_index_containing_id(id)?;
+            path.push(idx);
+            node = &node.children[idx];
+        }
+        Some(path)
     }
 
-    fn find_path_to_id(&self, id: NodeId, path: &mut TreePath) -> bool {
-        if self.id == id {
-            return true;
+    fn subtree_end(&self) -> NodeId {
+        self.id.saturating_add(self.subtree_node_count())
+    }
+
+    fn child_containing_id(&self, id: NodeId) -> Option<&FileNode> {
+        self.child_index_containing_id(id)
+            .and_then(|idx| self.children.get(idx))
+    }
+
+    fn child_index_containing_id(&self, id: NodeId) -> Option<usize> {
+        if !self.contains_id(id) || id == self.id {
+            return None;
         }
-        for (idx, child) in self.children.iter().enumerate() {
-            path.push(idx);
-            if child.find_path_to_id(id, path) {
-                return true;
-            }
-            path.pop();
-        }
-        false
+        let idx = self.children.partition_point(|child| child.id <= id);
+        let idx = idx.checked_sub(1)?;
+        self.children[idx].contains_id(id).then_some(idx)
     }
 }
 
@@ -113,7 +125,6 @@ impl FileTree {
 
     /// Build a file tree from one or more scan roots.
     pub fn scan_paths(roots: &[std::path::PathBuf]) -> Self {
-        let ext_map = Mutex::new(HashMap::<Box<str>, u64>::new());
         let mut root_node = if roots.len() == 1 {
             build_root_node(&roots[0])
         } else {
@@ -122,35 +133,8 @@ impl FileTree {
         let mut next_id = 1;
         assign_node_ids(&mut root_node, &mut next_id);
 
-        // Drain the main thread's local ext map
-        LOCAL_EXT_MAP.with(|m| {
-            let local = m.replace(HashMap::new());
-            if !local.is_empty() {
-                let mut global = ext_map.lock().unwrap_or_else(|e| e.into_inner());
-                for (k, v) in local {
-                    *global.entry(k).or_default() += v;
-                }
-            }
-        });
-
-        // Drain all rayon worker thread local ext maps
-        rayon::broadcast(|_| {
-            LOCAL_EXT_MAP.with(|m| {
-                let local = m.replace(HashMap::new());
-                if !local.is_empty() {
-                    let mut global = ext_map.lock().unwrap_or_else(|e| e.into_inner());
-                    for (k, v) in local {
-                        *global.entry(k).or_default() += v;
-                    }
-                }
-            });
-        });
-
-        let mut extensions: Vec<(Box<str>, u64)> = ext_map
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner())
-            .into_iter()
-            .collect();
+        let mut extensions: Vec<(Box<str>, u64)> =
+            extension_totals(&root_node).into_iter().collect();
         extensions.sort_unstable_by_key(|(_, size)| Reverse(*size));
 
         FileTree {
@@ -191,9 +175,27 @@ impl FileTree {
         Some(fs_path)
     }
 
+    pub fn node(&self, id: NodeId) -> Option<&FileNode> {
+        self.root.resolve_id(id)
+    }
+
+    pub fn path_for_id(&self, id: NodeId) -> Option<TreePath> {
+        self.root.path_to_id(id)
+    }
+
+    pub fn parent_id(&self, id: NodeId) -> Option<NodeId> {
+        let path = self.path_for_id(id)?;
+        let (_, parent_path) = path.split_last()?;
+        self.root.resolve_path(parent_path).map(|node| node.id)
+    }
+
+    pub fn contains(&self, root_id: NodeId, descendant_id: NodeId) -> bool {
+        self.node(root_id)
+            .is_some_and(|root| root.contains_id(descendant_id))
+    }
+
     pub fn build_fs_path_for_id(&self, id: NodeId) -> Option<std::path::PathBuf> {
-        self.root
-            .path_to_id(id)
+        self.path_for_id(id)
             .and_then(|path| self.build_fs_path(&path))
     }
 
@@ -260,6 +262,27 @@ fn root_display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn extension_totals(root: &FileNode) -> HashMap<Box<str>, u64> {
+    let mut totals = HashMap::new();
+    collect_extension_totals(root, &mut totals);
+    totals
+}
+
+fn collect_extension_totals(node: &FileNode, totals: &mut HashMap<Box<str>, u64>) {
+    if node.is_dir {
+        for child in node.children.iter() {
+            collect_extension_totals(child, totals);
+        }
+    } else {
+        let key = extension_key(&node.name);
+        if let Some(total) = totals.get_mut(key) {
+            *total += node.size;
+        } else {
+            totals.insert(key.into(), node.size);
+        }
+    }
+}
+
 /// Build a FileNode from an already-opened directory fd.
 /// `node_name` is the display name for this node.
 fn build_node_fd(
@@ -283,16 +306,6 @@ fn build_node_fd(
         } else {
             total_size += entry.disk_size;
             total_file_count += 1;
-            LOCAL_EXT_MAP.with(|m| {
-                let mut map = m.borrow_mut();
-                let ext = raw_extension(&entry.name);
-                let key: Box<str> = if ext.is_empty() {
-                    "(no ext)".into()
-                } else {
-                    ext.into()
-                };
-                *map.entry(key).or_default() += entry.disk_size;
-            });
             file_nodes.push(FileNode {
                 id: 0,
                 name: entry.name.clone(),
@@ -429,6 +442,30 @@ mod tests {
             tree.full_display_path_for_id(2),
             Some("/tmp/root/a".to_owned())
         );
+    }
+
+    #[test]
+    fn file_tree_uses_preorder_ranges_for_parent_and_containment() {
+        let tree = FileTree {
+            root: dir(
+                1,
+                "/tmp/root",
+                vec![
+                    dir(2, "a", vec![file(3, "nested.txt", 10)]),
+                    file(4, "b.bin", 20),
+                ],
+            ),
+            root_path: "/tmp/root".to_owned(),
+            extensions: Vec::new(),
+        };
+
+        assert_eq!(tree.node(2).map(|node| &*node.name), Some("a"));
+        assert_eq!(tree.parent_id(3), Some(2));
+        assert_eq!(tree.parent_id(1), None);
+        assert!(tree.contains(1, 3));
+        assert!(tree.contains(2, 3));
+        assert!(!tree.contains(2, 4));
+        assert!(!tree.contains(99, 3));
     }
 
     #[test]

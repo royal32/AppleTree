@@ -23,25 +23,21 @@ struct CushionLeaf {
 #[derive(Default)]
 pub struct TreemapCache {
     rects: Vec<treemap::Rect>,
-    root_path: Vec<usize>,
 }
 
 impl TreemapCache {
     pub fn clear(&mut self) {
         self.rects.clear();
-        self.root_path.clear();
     }
 
     fn rebuild_layout(
         &mut self,
         root: &FileNode,
-        root_path: Vec<usize>,
         bounds: treemap::Rect,
         prefs: &AppPrefs,
         shrunk_nodes: &BTreeSet<NodeId>,
     ) {
         self.rects.clear();
-        self.root_path = root_path;
         layout_node(root, bounds, 0, prefs, self, shrunk_nodes);
     }
 
@@ -60,12 +56,6 @@ impl TreemapCache {
             self.rects.resize(index + 1, treemap::Rect::new());
         }
         self.rects[index] = rect;
-    }
-
-    fn tree_path_for_hit(&self, hit: &HitNode<'_>) -> Vec<usize> {
-        let mut path = self.root_path.clone();
-        path.extend_from_slice(&hit.path);
-        path
     }
 }
 
@@ -114,7 +104,6 @@ impl TreemapState {
 
 struct HitNode<'a> {
     node: &'a FileNode,
-    path: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -175,7 +164,7 @@ pub fn show(
 
     let w = canvas.width();
     let h = canvas.height();
-    let display_root_id = if tree.root.resolve_id(state.root_id).is_some() {
+    let display_root_id = if tree.node(state.root_id).is_some() {
         state.root_id
     } else {
         tree.root.id
@@ -203,11 +192,10 @@ pub fn show(
 
         let mut leaves = Vec::new();
         let surface = [0.0f64; 4];
-        let display_root_path = tree.root.path_to_id(display_root_id).unwrap_or_default();
-        if let Some(root) = tree.root.resolve_id(display_root_id) {
+        if let Some(root) = tree.node(display_root_id) {
             state
                 .cache
-                .rebuild_layout(root, display_root_path, bounds, prefs, &state.shrunk_nodes);
+                .rebuild_layout(root, bounds, prefs, &state.shrunk_nodes);
             collect_cushion_leaves(
                 root,
                 &state.cache,
@@ -233,7 +221,7 @@ pub fn show(
         state.cached_layout_rect = Some(canvas);
     }
 
-    let Some(display_root) = tree.root.resolve_id(display_root_id) else {
+    let Some(display_root) = tree.node(display_root_id) else {
         return command;
     };
 
@@ -282,7 +270,7 @@ pub fn show(
         .data_mut(|data| data.get_temp::<NodeId>(menu_target_key));
     if let Some(id) = menu_target {
         response.context_menu(|ui| {
-            let can_zoom_in = tree.root.resolve_id(id).is_some_and(|node| node.is_dir);
+            let can_zoom_in = tree.node(id).is_some_and(|node| node.is_dir);
             ui::node_context_menu(
                 ui,
                 id,
@@ -301,10 +289,8 @@ pub fn show(
         && let Some(hit) = find_node_at(display_root, &state.cache, pos)
     {
         pane.hovered = Some(hit.node.id);
-        let tree_path = state.cache.tree_path_for_hit(&hit);
         let full_path = tree
-            .build_fs_path(&tree_path)
-            .map(|path| path.display().to_string())
+            .full_display_path_for_id(hit.node.id)
             .unwrap_or_else(|| hit.node.name.to_string());
         let tip = format!("{}\n{}", full_path, format_size(hit.node.size));
         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
@@ -583,33 +569,18 @@ fn find_node_at<'a>(
     cache: &TreemapCache,
     pos: egui::Pos2,
 ) -> Option<HitNode<'a>> {
-    let mut path = Vec::new();
-    find_node_at_inner(node, cache, pos, &mut path)
-}
-
-fn find_node_at_inner<'a>(
-    node: &'a FileNode,
-    cache: &TreemapCache,
-    pos: egui::Pos2,
-    path: &mut Vec<usize>,
-) -> Option<HitNode<'a>> {
     let r = cache.egui_rect(node.id)?;
     if !r.contains(pos) {
         return None;
     }
 
-    for (index, child) in node.children.iter().enumerate() {
-        path.push(index);
-        if let Some(hit) = find_node_at_inner(child, cache, pos, path) {
+    for child in node.children.iter() {
+        if let Some(hit) = find_node_at(child, cache, pos) {
             return Some(hit);
         }
-        path.pop();
     }
 
-    Some(HitNode {
-        node,
-        path: path.clone(),
-    })
+    Some(HitNode { node })
 }
 
 fn paint_folder_backgrounds(
@@ -818,7 +789,7 @@ fn shrink_marker(
 
         None
     } else {
-        let size = rect.width().min(rect.height()).min(22.0).max(13.0);
+        let size = rect.width().min(rect.height()).clamp(13.0, 22.0);
         Some(ShrinkMarker::File(Rect::from_min_size(
             pos2(rect.right() - size - 3.0, rect.top() + 3.0),
             vec2(size, size),
