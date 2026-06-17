@@ -113,10 +113,17 @@ pub fn show(
     frame.show(ui, |ui| {
         ui.set_min_height(content_height);
         ui.set_max_height(content_height);
-        egui::ScrollArea::both()
+        let table_width = prefs
+            .columns
+            .iter()
+            .map(|pref| pref.width + RESIZE_W)
+            .sum::<f32>();
+
+        egui::ScrollArea::horizontal()
             .id_salt("file_table_scroll")
-            .auto_shrink([false; 2])
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.set_min_width(table_width);
                 show_header(ui, prefs, prefs_changed);
                 table.begin_frame(prefs);
 
@@ -140,11 +147,19 @@ pub fn show(
                         alt_row_color,
                     },
                 };
-                for (row_index, row) in rows.iter().enumerate() {
-                    if let Some(cmd) = show_row(ui, row, row_index, &mut row_context) {
-                        command = Some(cmd);
-                    }
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("file_table_rows")
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW_H, rows.len(), |ui, row_range| {
+                        ui.set_min_width(table_width);
+                        for row_index in row_range {
+                            if let Some(cmd) =
+                                show_row(ui, &rows[row_index], row_index, &mut row_context)
+                            {
+                                command = Some(cmd);
+                            }
+                        }
+                    });
             });
     });
 
@@ -640,5 +655,7 @@ fn compare_nodes(a: &FileNode, b: &FileNode, prefs: &AppPrefs) -> Ordering {
 }
 
 fn natural_name_cmp(a: &str, b: &str) -> Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
 }

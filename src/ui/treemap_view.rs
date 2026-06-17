@@ -539,13 +539,15 @@ fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLea
             // The surface coords are in canvas pixel space
             let sy = canvas_top + iy as f64 + 0.5;
             let ny = -(2.0 * s[1] * sy + s[3]);
+            let ny_term = ny * ny + 1.0;
             let row_offset = iy * pw;
+            let row = &mut image.pixels[row_offset + left..row_offset + right];
+            let sx = canvas_left + left as f64 + 0.5;
+            let mut nx = -(2.0 * s[0] * sx + s[2]);
+            let nx_step = -2.0 * s[0];
 
-            for ix in left..right {
-                let sx = canvas_left + ix as f64 + 0.5;
-                let nx = -(2.0 * s[0] * sx + s[2]);
-
-                let cosa = (nx * lx + ny * ly + lz) / (nx * nx + ny * ny + 1.0).sqrt();
+            for dest in row {
+                let cosa = (nx * lx + ny * ly + lz) / (nx * nx + ny_term).sqrt();
                 let cosa = cosa.clamp(0.0, 1.0);
 
                 let pixel = (DIFFUSE * cosa + AMBIENT) * BRIGHTNESS_FACTOR;
@@ -554,9 +556,8 @@ fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLea
                 let pg = (col_g * pixel).min(255.0) as u8;
                 let pb = (col_b * pixel).min(255.0) as u8;
 
-                if let Some(dest) = image.pixels.get_mut(row_offset + ix) {
-                    *dest = Color32::from_rgb(pr, pg, pb);
-                }
+                *dest = Color32::from_rgb(pr, pg, pb);
+                nx += nx_step;
             }
         }
     }

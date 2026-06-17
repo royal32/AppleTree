@@ -90,10 +90,13 @@ pub(crate) fn close_dir(fd: libc::c_int) {
     }
 }
 
-/// Scan using an already-opened fd. Returns entries without closing the fd.
-pub(crate) fn scan_dir_entries_fd(fd: libc::c_int) -> Vec<DirEntry> {
+/// Scan using an already-opened fd. Emits entries without closing the fd.
+pub(crate) fn scan_dir_entries_fd<F>(fd: libc::c_int, mut emit: F)
+where
+    F: FnMut(DirEntry),
+{
     if fd < 0 {
-        return Vec::new();
+        return;
     }
 
     let mut attrlist: libc::attrlist = unsafe { std::mem::zeroed() };
@@ -101,8 +104,6 @@ pub(crate) fn scan_dir_entries_fd(fd: libc::c_int) -> Vec<DirEntry> {
     attrlist.commonattr =
         ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME;
     attrlist.fileattr = ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE;
-
-    let mut results = Vec::new();
 
     SCAN_BUFFER.with(|buf| {
         let mut buffer = buf.borrow_mut();
@@ -122,11 +123,9 @@ pub(crate) fn scan_dir_entries_fd(fd: libc::c_int) -> Vec<DirEntry> {
                 break;
             }
 
-            parse_dir_entries(&buffer, count as usize, &mut results);
+            parse_dir_entries(&buffer, count as usize, &mut emit);
         }
     }); // end SCAN_BUFFER.with
-
-    results
 }
 
 /// Read a native-endian u32 from `buf` at `offset`. Returns 0 if out of bounds.
@@ -161,8 +160,11 @@ fn read_i64(buf: &[u8], offset: usize) -> i64 {
         .unwrap_or(0)
 }
 
-/// Parse buffer entries into DirEntry directly (no intermediate struct).
-fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
+/// Parse buffer entries into DirEntry directly.
+fn parse_dir_entries<F>(buffer: &[u8], count: usize, emit: &mut F)
+where
+    F: FnMut(DirEntry),
+{
     let buf_size = buffer.len();
     let mut offset = 0usize;
     for _ in 0..count {
@@ -245,7 +247,7 @@ fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
             let _ = value_pos;
         }
 
-        results.push(DirEntry {
+        emit(DirEntry {
             name,
             is_dir: obj_type == VDIR,
             disk_size: disk_size.unwrap_or(total_size),

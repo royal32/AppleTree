@@ -11,6 +11,9 @@ pub type NodeId = u64;
 /// Index path from root to a node in the tree (e.g. [2, 0, 1] = root's 3rd child -> 1st child -> 2nd child).
 pub type TreePath = Vec<usize>;
 
+const PARALLEL_EAGER_DEPTH: usize = 2;
+const PARALLEL_DIR_MIN_COUNT: usize = 8;
+
 fn raw_extension(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((_, ext)) if !ext.is_empty() => ext,
@@ -223,7 +226,7 @@ fn build_root_node(path: &Path) -> FileNode {
     }
     let name: Box<str> = root_display_name(path).into();
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    let mut node = build_node_fd(fd, name, modified);
+    let mut node = build_node_fd(fd, name, modified, 0);
     node.source_path = Some(path.display().to_string().into());
     getattrlistbulk::close_dir(fd);
     node
@@ -289,26 +292,24 @@ fn build_node_fd(
     parent_fd: libc::c_int,
     node_name: Box<str>,
     modified: Option<SystemTime>,
+    depth: usize,
 ) -> FileNode {
     use rayon::prelude::*;
 
-    let entries = getattrlistbulk::scan_dir_entries_fd(parent_fd);
-
-    // Separate files and directories
     let mut file_nodes: Vec<FileNode> = Vec::new();
-    let mut dir_names: Vec<&DirEntry> = Vec::new();
+    let mut dir_entries: Vec<DirEntry> = Vec::new();
     let mut total_size: u64 = 0;
     let mut total_file_count: u64 = 0;
 
-    for entry in &entries {
+    getattrlistbulk::scan_dir_entries_fd(parent_fd, |entry| {
         if entry.is_dir {
-            dir_names.push(entry);
+            dir_entries.push(entry);
         } else {
             total_size += entry.disk_size;
             total_file_count += 1;
             file_nodes.push(FileNode {
                 id: 0,
-                name: entry.name.clone(),
+                name: entry.name,
                 source_path: None,
                 size: entry.disk_size,
                 is_dir: false,
@@ -318,20 +319,20 @@ fn build_node_fd(
                 dir_count: 0,
             });
         }
-    }
+    });
 
     // Recurse into subdirectories — use openat() relative to parent fd
-    let build_child = |entry: &&DirEntry| -> FileNode {
+    let build_child = |entry: &DirEntry| -> FileNode {
         let child_fd = getattrlistbulk::openat_dir(parent_fd, &entry.name);
-        let node = build_node_fd(child_fd, entry.name.clone(), entry.modified);
+        let node = build_node_fd(child_fd, entry.name.clone(), entry.modified, depth + 1);
         getattrlistbulk::close_dir(child_fd);
         node
     };
 
-    let dir_nodes: Vec<FileNode> = if dir_names.len() >= 2 {
-        dir_names.par_iter().map(build_child).collect()
+    let dir_nodes: Vec<FileNode> = if should_scan_dirs_in_parallel(depth, dir_entries.len()) {
+        dir_entries.par_iter().map(build_child).collect()
     } else {
-        dir_names.iter().map(build_child).collect()
+        dir_entries.iter().map(build_child).collect()
     };
 
     let mut total_dir_count: u64 = 0;
@@ -358,6 +359,10 @@ fn build_node_fd(
         file_count: total_file_count,
         dir_count: total_dir_count + 1,
     }
+}
+
+fn should_scan_dirs_in_parallel(depth: usize, dir_count: usize) -> bool {
+    dir_count >= PARALLEL_DIR_MIN_COUNT || (depth < PARALLEL_EAGER_DEPTH && dir_count >= 2)
 }
 
 #[cfg(test)]
