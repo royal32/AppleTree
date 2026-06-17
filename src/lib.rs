@@ -1,4 +1,6 @@
 pub mod app;
+#[doc(hidden)]
+pub mod bench;
 pub(crate) mod memory;
 pub mod model;
 #[cfg(target_os = "macos")]

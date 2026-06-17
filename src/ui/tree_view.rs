@@ -637,7 +637,7 @@ fn collect_rows<'a>(
     }
 }
 
-fn compare_nodes(a: &FileNode, b: &FileNode, prefs: &AppPrefs) -> Ordering {
+pub(crate) fn compare_nodes(a: &FileNode, b: &FileNode, prefs: &AppPrefs) -> Ordering {
     let ord = match prefs.sort_column {
         TableColumn::Name => natural_name_cmp(&a.name, &b.name),
         TableColumn::Size | TableColumn::PercentOfParent => a.size.cmp(&b.size),

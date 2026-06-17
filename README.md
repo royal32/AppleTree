@@ -33,6 +33,19 @@ cargo run --release
 cargo run --release -- /path/to/scan
 ```
 
+## Benchmarking
+
+```sh
+# Scan throughput
+cargo run --release --bin bench -- scan "$HOME" --runs 5 --warmups 1
+
+# Table sort cost
+cargo run --release --bin bench -- table-sort "$HOME" --sort name --asc
+
+# Treemap layout and cushion render cost
+cargo run --release --bin bench -- treemap-render "$HOME" --width 1200 --height 800
+```
+
 ## How it works
 
 MacDirStat scans directories using the macOS `getattrlistbulk` syscall, which retrieves multiple directory entries with their attributes in a single kernel call — avoiding per-file overhead. Directory traversal is parallelized across cores using rayon, with `openat()` for efficient relative path resolution.

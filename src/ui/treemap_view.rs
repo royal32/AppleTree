@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2, vec2};
 use treemap::{Mappable, TreemapLayout};
@@ -66,6 +67,15 @@ pub struct TreemapState {
     cached_layout_rect: Option<Rect>,
     cache: TreemapCache,
     texture: Option<TextureHandle>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TreemapRenderBench {
+    pub(crate) layout: Duration,
+    pub(crate) render: Duration,
+    pub(crate) total: Duration,
+    pub(crate) leaves: usize,
+    pub(crate) pixels: usize,
 }
 
 impl TreemapState {
@@ -336,6 +346,48 @@ pub fn show(
     paint_deleted_outlines(&painter, &state.cache, deleted);
 
     command
+}
+
+pub(crate) fn benchmark_render(
+    tree: &FileTree,
+    color_map: &ColorMap,
+    prefs: &AppPrefs,
+    width: usize,
+    height: usize,
+) -> TreemapRenderBench {
+    let width = width.max(1);
+    let height = height.max(1);
+    let bounds = treemap::Rect::from_points(0.0, 0.0, width as f64, height as f64);
+    let canvas = Rect::from_min_size(pos2(0.0, 0.0), vec2(width as f32, height as f32));
+    let mut cache = TreemapCache::default();
+    let mut leaves = Vec::new();
+
+    let total_start = Instant::now();
+    let layout_start = Instant::now();
+    cache.rebuild_layout(&tree.root, bounds, prefs, &BTreeSet::new());
+    collect_cushion_leaves(
+        &tree.root,
+        &cache,
+        [0.0; 4],
+        CUSHION_HEIGHT,
+        true,
+        color_map,
+        &mut leaves,
+    );
+    let layout = layout_start.elapsed();
+
+    let render_start = Instant::now();
+    let image = render_cushion_image(width, height, canvas, &leaves);
+    let render = render_start.elapsed();
+    std::hint::black_box(image);
+
+    TreemapRenderBench {
+        layout,
+        render,
+        total: total_start.elapsed(),
+        leaves: leaves.len(),
+        pixels: width * height,
+    }
 }
 
 fn layout_node(
