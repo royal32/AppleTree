@@ -48,7 +48,7 @@ impl TableColumn {
     pub fn title(self) -> &'static str {
         match self {
             Self::Name => "Name",
-            Self::Size => "Size",
+            Self::Size => "Size on Disk",
             Self::PercentOfParent => "% Parent",
             Self::Items => "Items",
             Self::Files => "Files",
@@ -60,7 +60,7 @@ impl TableColumn {
     pub fn default_width(self) -> f32 {
         match self {
             Self::Name => 240.0,
-            Self::Size => 82.0,
+            Self::Size => 100.0,
             Self::PercentOfParent => 74.0,
             Self::Items => 70.0,
             Self::Files => 70.0,
@@ -228,6 +228,11 @@ impl AppPrefs {
                     column,
                     width: column.default_width(),
                 });
+            }
+        }
+        for pref in self.columns.iter_mut() {
+            if pref.column == TableColumn::Size && pref.width < TableColumn::Size.default_width() {
+                pref.width = TableColumn::Size.default_width();
             }
         }
     }

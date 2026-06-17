@@ -28,6 +28,7 @@ fn raw_extension(name: &str) -> &str {
 pub struct FileNode {
     pub id: NodeId,
     pub name: Box<str>,
+    /// Allocated bytes on disk. Directory values are aggregated from descendants.
     pub size: u64,
     pub is_dir: bool,
     pub children: Box<[FileNode]>,
@@ -97,7 +98,7 @@ impl FileNode {
 pub struct FileTree {
     pub root: FileNode,
     pub root_path: String,
-    /// Extension -> total bytes mapping, sorted by size descending.
+    /// Extension -> total allocated bytes mapping, sorted by size descending.
     pub extensions: Vec<(Box<str>, u64)>,
 }
 
@@ -223,7 +224,7 @@ fn build_node_fd(
         if entry.is_dir {
             dir_names.push(entry);
         } else {
-            total_size += entry.file_size;
+            total_size += entry.disk_size;
             total_file_count += 1;
             LOCAL_EXT_MAP.with(|m| {
                 let mut map = m.borrow_mut();
@@ -233,12 +234,12 @@ fn build_node_fd(
                 } else {
                     ext.into()
                 };
-                *map.entry(key).or_default() += entry.file_size;
+                *map.entry(key).or_default() += entry.disk_size;
             });
             file_nodes.push(FileNode {
                 id: 0,
                 name: entry.name.clone(),
-                size: entry.file_size,
+                size: entry.disk_size,
                 is_dir: false,
                 children: Box::new([]),
                 modified: entry.modified,

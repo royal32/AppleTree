@@ -27,15 +27,16 @@ const ATTR_CMN_MODTIME: libc::attrgroup_t = 0x0000_0400;
 
 // fileattr bits
 const ATTR_FILE_TOTALSIZE: libc::attrgroup_t = 0x0000_0002;
+const ATTR_FILE_ALLOCSIZE: libc::attrgroup_t = 0x0000_0004;
 
 // Object types
 const VDIR: u32 = 2; // directory
 
-/// A directory entry with name, type, and size.
+/// A directory entry with name, type, and allocated size on disk.
 pub(crate) struct DirEntry {
     pub name: Box<str>,
     pub is_dir: bool,
-    pub file_size: u64,
+    pub disk_size: u64,
     pub modified: Option<std::time::SystemTime>,
 }
 
@@ -99,7 +100,7 @@ pub(crate) fn scan_dir_entries_fd(fd: libc::c_int) -> Vec<DirEntry> {
     attrlist.bitmapcount = ATTR_BIT_MAP_COUNT;
     attrlist.commonattr =
         ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME;
-    attrlist.fileattr = ATTR_FILE_TOTALSIZE;
+    attrlist.fileattr = ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE;
 
     let mut results = Vec::new();
 
@@ -232,16 +233,22 @@ fn parse_dir_entries(buffer: &[u8], count: usize, results: &mut Vec<DirEntry>) {
             None
         };
 
-        let file_size = if returned_fileattr & ATTR_FILE_TOTALSIZE != 0 {
-            read_u64(buffer, value_pos)
+        let mut total_size = 0;
+        let mut disk_size = None;
+        if returned_fileattr & ATTR_FILE_TOTALSIZE != 0 {
+            total_size = read_u64(buffer, value_pos);
+            value_pos += 8;
+        }
+        if returned_fileattr & ATTR_FILE_ALLOCSIZE != 0 {
+            disk_size = Some(read_u64(buffer, value_pos));
         } else {
-            0
-        };
+            let _ = value_pos;
+        }
 
         results.push(DirEntry {
             name,
             is_dir: obj_type == VDIR,
-            file_size,
+            disk_size: disk_size.unwrap_or(total_size),
             modified,
         });
         offset += entry_length;
