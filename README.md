@@ -23,6 +23,18 @@ Requires Rust (2024 edition). macOS only — uses platform-specific APIs for fas
 cargo build --release
 ```
 
+## Packaging
+
+Build a native macOS app bundle:
+
+```sh
+scripts/package-macos-app.sh
+```
+
+The bundle is written to `target/release/macos/AppleTree.app` and ad-hoc signed
+by default. Set `CODESIGN_IDENTITY` to use a Developer ID certificate, or
+`CODESIGN=0` to skip signing.
+
 ## Usage
 
 ```sh
