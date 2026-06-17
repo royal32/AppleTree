@@ -497,8 +497,8 @@ impl eframe::App for App {
             self.start_scan_paths(paths);
         }
 
-        // Handle ⌘O and pending scans from breadcrumb menu (outside the match
-        // to avoid borrow conflicts with self.state).
+        // Handle ⌘O and pending scans requested by in-panel controls outside
+        // the match to avoid borrow conflicts with self.state.
         if let AppState::Loaded(loaded) = &mut self.state {
             let cmd_o = ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.command);
             let paths = if cmd_o {
@@ -715,7 +715,6 @@ impl LoadedState {
                     if !enabled {
                         ui.disable();
                     }
-                    self.show_breadcrumb_area(ui);
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
                         *command = Some(cmd);
                     }
@@ -750,7 +749,6 @@ impl LoadedState {
                     if !enabled {
                         ui.disable();
                     }
-                    self.show_breadcrumb_area(ui);
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
                         *command = Some(cmd);
                     }
@@ -822,106 +820,11 @@ impl LoadedState {
         )
     }
 
-    fn show_breadcrumb_area(&mut self, ui: &mut egui::Ui) {
-        let mut new_scan_path: Option<PathBuf> = None;
-        self.show_breadcrumb(ui, &mut new_scan_path);
-        ui.add_space(2.0);
-        if let Some(path) = new_scan_path {
-            self.pending_scan = Some(vec![path]);
-        }
-    }
-
     fn status_path(&self) -> Option<String> {
         self.pane
             .hovered
             .or(self.pane.selected)
             .and_then(|id| self.tree.full_display_path_for_id(id))
-    }
-
-    fn show_breadcrumb(&self, ui: &mut egui::Ui, new_scan_path: &mut Option<PathBuf>) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if self.tree.root.source_path.is_none() && self.tree.root_path.is_empty() {
-                ui.label(egui::RichText::new("Scan Scope").size(14.0).strong());
-                return;
-            }
-            let segments: Vec<&str> = self
-                .tree
-                .root_path
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            ui.label(egui::RichText::new("\u{1F4BB}").size(13.0));
-            let last_idx = segments.len().saturating_sub(1);
-            if !segments.is_empty() {
-                ui.label(egui::RichText::new("Macintosh HD").size(13.0));
-                ui.label(
-                    egui::RichText::new(" \u{203A} ")
-                        .size(13.0)
-                        .color(egui::Color32::GRAY),
-                );
-            }
-            for (i, seg) in segments.iter().enumerate() {
-                if i == last_idx {
-                    let blue = egui::Color32::from_rgb(56, 132, 244);
-                    let text = egui::RichText::new(*seg).size(14.0).strong().color(blue);
-                    let resp = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
-
-                    let chevron_center =
-                        egui::pos2(resp.rect.right() + 6.0, resp.rect.center().y + 1.0);
-                    let s = 3.0;
-                    ui.painter().add(egui::Shape::convex_polygon(
-                        vec![
-                            egui::pos2(chevron_center.x - s, chevron_center.y - s),
-                            egui::pos2(chevron_center.x + s, chevron_center.y - s),
-                            egui::pos2(chevron_center.x, chevron_center.y + s),
-                        ],
-                        blue,
-                        egui::Stroke::NONE,
-                    ));
-                    ui.add_space(14.0);
-
-                    let menu_id = resp.id.with("breadcrumb_menu");
-                    if resp.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(menu_id));
-                    }
-                    egui::popup_below_widget(
-                        ui,
-                        menu_id,
-                        &resp,
-                        egui::PopupCloseBehavior::CloseOnClick,
-                        |ui| {
-                            ui.set_min_width(200.0);
-                            if ui.button("\u{1F4C2}  Open Folder\u{2026}").clicked()
-                                && let Some(path) = pick_folder()
-                            {
-                                *new_scan_path = Some(path);
-                            }
-                            if segments.len() > 1 {
-                                ui.separator();
-                                let mut path = PathBuf::from("/");
-                                for (j, ancestor) in segments[..last_idx].iter().enumerate() {
-                                    path.push(ancestor);
-                                    let indent = "  ".repeat(j);
-                                    let label = format!("{indent}\u{1F4C1}  {ancestor}");
-                                    if ui.button(&label).clicked() {
-                                        *new_scan_path = Some(path.clone());
-                                    }
-                                }
-                            }
-                        },
-                    );
-                } else {
-                    ui.label(egui::RichText::new(*seg).size(13.0));
-                    ui.label(
-                        egui::RichText::new(" \u{203A} ")
-                            .size(13.0)
-                            .color(egui::Color32::GRAY),
-                    );
-                }
-            }
-        });
     }
 }
 
@@ -1252,9 +1155,7 @@ fn show_empty_panes(
             }
             show_table_scope_row(
                 ui,
-                |ui| {
-                    ui::tree_view::show_branding(ui);
-                },
+                |_ui| {},
                 |ui| {
                     if let Some(paths) = show_scope_panel(ui, scope, enabled) {
                         *scan_request = Some(paths);
@@ -1326,9 +1227,7 @@ fn show_scan_failed(
         .frame(
             egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
         )
-        .show(ctx, |ui| {
-            ui::tree_view::show_branding(ui);
-        });
+        .show(ctx, |_ui| {});
 
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.centered_and_justified(|ui| {
@@ -1457,7 +1356,7 @@ fn pick_folder_at_home() -> Option<PathBuf> {
         .pick_folder()
 }
 
-/// Folder picker — used from the breadcrumb menu.
+/// Folder picker used by explicit rescan controls.
 fn pick_folder() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Select folder to scan")

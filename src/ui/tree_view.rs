@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use egui::{Color32, Id, Rect, RichText, Sense, Stroke, pos2, vec2};
+use egui::{Color32, Id, Rect, Sense, Stroke, pos2, vec2};
 
 use crate::model::tree::{FileNode, FileTree, NodeId};
 use crate::settings::{AppPrefs, TableColumn};
@@ -73,20 +73,6 @@ struct TextStyle {
     color: Color32,
 }
 
-pub fn show_branding(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label(RichText::new("Mac").size(16.0).strong());
-        ui.label(
-            RichText::new("Dir")
-                .size(16.0)
-                .strong()
-                .color(Color32::from_rgb(56, 132, 244)),
-        );
-        ui.label(RichText::new("Stat").size(16.0).strong());
-    });
-}
-
 pub fn show(
     ui: &mut egui::Ui,
     tree: &FileTree,
@@ -102,9 +88,6 @@ pub fn show(
         file_icons,
         table,
     } = state;
-
-    show_branding(ui);
-    ui.add_space(4.0);
 
     expanded.insert(tree.root.id);
 
