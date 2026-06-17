@@ -908,6 +908,7 @@ mod tests {
         FileNode {
             id,
             name: name.into(),
+            source_path: None,
             size,
             is_dir: false,
             children: Box::new([]),

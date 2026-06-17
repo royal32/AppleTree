@@ -28,6 +28,8 @@ fn raw_extension(name: &str) -> &str {
 pub struct FileNode {
     pub id: NodeId,
     pub name: Box<str>,
+    /// Absolute filesystem path for scan-root nodes.
+    pub source_path: Option<Box<str>>,
     /// Allocated bytes on disk. Directory values are aggregated from descendants.
     pub size: u64,
     pub is_dir: bool,
@@ -105,8 +107,18 @@ pub struct FileTree {
 impl FileTree {
     /// Build a file tree by scanning the given path using getattrlistbulk.
     pub fn scan(root: &Path) -> Self {
+        let roots = [root.to_path_buf()];
+        Self::scan_paths(&roots)
+    }
+
+    /// Build a file tree from one or more scan roots.
+    pub fn scan_paths(roots: &[std::path::PathBuf]) -> Self {
         let ext_map = Mutex::new(HashMap::<Box<str>, u64>::new());
-        let mut root_node = build_root_node(root);
+        let mut root_node = if roots.len() == 1 {
+            build_root_node(&roots[0])
+        } else {
+            build_virtual_root(roots)
+        };
         let mut next_id = 1;
         assign_node_ids(&mut root_node, &mut next_id);
 
@@ -143,18 +155,37 @@ impl FileTree {
 
         FileTree {
             root: root_node,
-            root_path: root.display().to_string(),
+            root_path: if roots.len() == 1 {
+                roots
+                    .first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
             extensions,
         }
     }
 
     /// Build the full filesystem path for a node identified by index path.
     pub fn build_fs_path(&self, path: &[usize]) -> Option<std::path::PathBuf> {
-        let mut fs_path = std::path::PathBuf::from(&self.root_path);
+        if path.is_empty() && self.root.source_path.is_none() && self.root_path.is_empty() {
+            return None;
+        }
+        let mut fs_path = self
+            .root
+            .source_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(&self.root_path));
         let mut node = &self.root;
         for &idx in path {
             let child = node.children.get(idx)?;
-            fs_path.push(&*child.name);
+            if let Some(source_path) = child.source_path.as_deref() {
+                fs_path = std::path::PathBuf::from(source_path);
+            } else {
+                fs_path.push(&*child.name);
+            }
             node = child;
         }
         Some(fs_path)
@@ -190,9 +221,35 @@ fn build_root_node(path: &Path) -> FileNode {
     }
     let name: Box<str> = root_display_name(path).into();
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    let node = build_node_fd(fd, name, modified);
+    let mut node = build_node_fd(fd, name, modified);
+    node.source_path = Some(path.display().to_string().into());
     getattrlistbulk::close_dir(fd);
     node
+}
+
+fn build_virtual_root(roots: &[std::path::PathBuf]) -> FileNode {
+    let mut children = roots
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| build_root_node(path))
+        .collect::<Vec<_>>();
+    children.sort_unstable_by_key(|child| Reverse(child.size));
+
+    let size = children.iter().map(|child| child.size).sum();
+    let file_count = children.iter().map(|child| child.file_count).sum();
+    let dir_count = 1 + children.iter().map(|child| child.dir_count).sum::<u64>();
+
+    FileNode {
+        id: 0,
+        name: "Scan Scope".into(),
+        source_path: None,
+        size,
+        is_dir: true,
+        children: children.into(),
+        modified: None,
+        file_count,
+        dir_count,
+    }
 }
 
 fn root_display_name(path: &Path) -> String {
@@ -239,6 +296,7 @@ fn build_node_fd(
             file_nodes.push(FileNode {
                 id: 0,
                 name: entry.name.clone(),
+                source_path: None,
                 size: entry.disk_size,
                 is_dir: false,
                 children: Box::new([]),
@@ -279,6 +337,7 @@ fn build_node_fd(
     FileNode {
         id: 0,
         name: node_name,
+        source_path: None,
         size: total_size,
         is_dir: true,
         children: children.into(),
@@ -296,6 +355,7 @@ mod tests {
         FileNode {
             id,
             name: name.into(),
+            source_path: None,
             size,
             is_dir: false,
             children: Box::new([]),
@@ -312,6 +372,7 @@ mod tests {
         FileNode {
             id,
             name: name.into(),
+            source_path: None,
             size,
             is_dir: true,
             children: children.into(),
@@ -319,6 +380,12 @@ mod tests {
             file_count,
             dir_count,
         }
+    }
+
+    fn source_dir(id: NodeId, name: &str, source_path: &str, children: Vec<FileNode>) -> FileNode {
+        let mut node = dir(id, name, children);
+        node.source_path = Some(source_path.into());
+        node
     }
 
     #[test]
@@ -362,6 +429,30 @@ mod tests {
             tree.full_display_path_for_id(2),
             Some("/tmp/root/a".to_owned())
         );
+    }
+
+    #[test]
+    fn virtual_scan_root_builds_paths_from_source_roots() {
+        let tree = FileTree {
+            root: dir(
+                1,
+                "Scan Scope",
+                vec![source_dir(
+                    2,
+                    "Applications",
+                    "/Applications",
+                    vec![file(3, "Example.app", 7)],
+                )],
+            ),
+            root_path: String::new(),
+            extensions: Vec::new(),
+        };
+
+        assert_eq!(
+            tree.build_fs_path_for_id(3).as_deref(),
+            Some(Path::new("/Applications/Example.app"))
+        );
+        assert!(tree.build_fs_path_for_id(1).is_none());
     }
 
     #[test]

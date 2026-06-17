@@ -125,8 +125,13 @@ pub fn show(
         .fill(frame_fill)
         .corner_radius(8.0)
         .inner_margin(4.0);
+    let frame_height = ui.available_height();
+    let content_height = (frame_height - frame.total_margin().sum().y).max(0.0);
     frame.show(ui, |ui| {
+        ui.set_min_height(content_height);
+        ui.set_max_height(content_height);
         egui::ScrollArea::both()
+            .id_salt("file_table_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 show_header(ui, prefs, prefs_changed);
