@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -37,6 +37,38 @@ struct LoadedState {
     scan_time_ms: f64,
     pending_scan: Option<PathBuf>,
     file_icons: FileIconCache,
+    memory_relief: MemoryRelief,
+}
+
+struct MemoryRelief {
+    until: Instant,
+    next: Instant,
+}
+
+impl MemoryRelief {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            until: now + Duration::from_secs(120),
+            next: now,
+        }
+    }
+
+    fn restart(&mut self) {
+        *self = Self::new();
+    }
+
+    fn run(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if now >= self.until {
+            return;
+        }
+        if now >= self.next {
+            crate::memory::pressure_relief();
+            self.next = now + Duration::from_secs(1);
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
 }
 
 impl App {
@@ -124,6 +156,7 @@ impl eframe::App for App {
                 scan_time_ms,
                 pending_scan: None,
                 file_icons: FileIconCache::default(),
+                memory_relief: MemoryRelief::new(),
             }));
         }
 
@@ -166,6 +199,7 @@ impl eframe::App for App {
                 if let Some(command) = command {
                     execute_node_command(loaded, ctx, command);
                 }
+                loaded.memory_relief.run(ctx);
             }
         }
 
@@ -293,6 +327,7 @@ impl LoadedState {
                         prefs.treemap_folder_depth = folder_depth as usize;
                         *prefs_changed = true;
                         self.treemap.clear_layout();
+                        self.memory_relief.restart();
                     }
                 });
             });
@@ -599,6 +634,7 @@ fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {
     loaded.treemap.root_id = id;
     loaded.pane.selected = Some(id);
     loaded.treemap.clear_layout();
+    loaded.memory_relief.restart();
 }
 
 fn zoom_out_treemap(loaded: &mut LoadedState) {
@@ -608,6 +644,7 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
         loaded.treemap.root_id = previous;
         loaded.pane.selected = Some(previous);
         loaded.treemap.clear_layout();
+        loaded.memory_relief.restart();
         return;
     }
 
@@ -615,6 +652,7 @@ fn zoom_out_treemap(loaded: &mut LoadedState) {
         loaded.treemap.root_id = parent_id;
         loaded.pane.selected = Some(parent_id);
         loaded.treemap.clear_layout();
+        loaded.memory_relief.restart();
         return;
     }
 
