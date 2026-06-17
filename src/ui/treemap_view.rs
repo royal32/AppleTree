@@ -710,7 +710,7 @@ fn paint_file_labels(
     let Some(rect) = cache.egui_rect(node.id) else {
         return;
     };
-    let Some(header) = file_label_header_rect(rect) else {
+    let Some(header) = file_label_header_rect(rect, prefs.treemap_label_depth) else {
         return;
     };
     // Draw a semi-transparent dark background behind file labels for better readability.
@@ -736,11 +736,20 @@ fn node_size_label(node: &FileNode) -> String {
     format!("{} ({})", node.name, format_size(node.size))
 }
 
-fn file_label_header_rect(rect: Rect) -> Option<Rect> {
-    if rect.width() < FILE_LABEL_MIN_W
-        || rect.height() < FILE_LABEL_MIN_H
-        || rect.width() * rect.height() < FILE_LABEL_MIN_AREA
-    {
+fn file_label_header_rect(rect: Rect, label_depth: usize) -> Option<Rect> {
+    let scale = match label_depth {
+        0 => return None,
+        1 => 1.0,
+        2 => 0.72,
+        3 => 0.52,
+        4 => 0.38,
+        _ => 0.28,
+    };
+    let min_w = FILE_LABEL_MIN_W * scale;
+    let min_h = (FILE_LABEL_MIN_H * scale).max(10.0);
+    let min_area = (FILE_LABEL_MIN_AREA * scale * scale).max(650.0);
+
+    if rect.width() < min_w || rect.height() < min_h || rect.width() * rect.height() < min_area {
         return None;
     }
 

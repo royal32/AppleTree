@@ -66,6 +66,8 @@ struct LoadedState {
     pending_scan: Option<Vec<PathBuf>>,
     file_icons: FileIconCache,
     memory_relief: MemoryRelief,
+    last_file_label_depth: usize,
+    last_folder_label_depth: usize,
 }
 
 struct ScanScopeState {
@@ -88,6 +90,9 @@ struct ScopeSpace {
 
 const SCOPE_PANEL_WIDTH: f32 = 280.0;
 const SCOPE_PANEL_GAP: f32 = 8.0;
+const LEFT_RIGHT_SCOPE_PANEL_HEIGHT: f32 = 330.0;
+const LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT: f32 = 190.0;
+const FILE_TABLE_MIN_HEIGHT: f32 = 220.0;
 const SCOPE_LOGO_MAX_WIDTH: f32 = 150.0;
 const SCOPE_LOGO_BOTTOM_GAP: f32 = 8.0;
 const SCOPE_LIST_MIN_HEIGHT: f32 = 96.0;
@@ -444,7 +449,14 @@ impl eframe::App for App {
         match &mut self.state {
             AppState::WaitingForPicker { frames } => {
                 let mut scan_paths = None;
-                show_empty_panes(ctx, &mut self.scope, &scope_logo, &mut scan_paths, true);
+                show_empty_panes(
+                    ctx,
+                    &mut self.scope,
+                    &scope_logo,
+                    self.prefs.split_orientation,
+                    &mut scan_paths,
+                    true,
+                );
                 if let Some(paths) = scan_paths {
                     *frames = u8::MAX;
                     immediate_scan_paths = Some(paths);
@@ -482,7 +494,14 @@ impl eframe::App for App {
                     previous.memory_relief.run(ctx);
                 } else {
                     let mut scan_paths = None;
-                    show_empty_panes(ctx, &mut self.scope, &scope_logo, &mut scan_paths, false);
+                    show_empty_panes(
+                        ctx,
+                        &mut self.scope,
+                        &scope_logo,
+                        self.prefs.split_orientation,
+                        &mut scan_paths,
+                        false,
+                    );
                 }
                 show_scanning_overlay(ctx, paths, start_time.elapsed());
             }
@@ -552,6 +571,7 @@ impl LoadedState {
         let mut expanded = BTreeSet::new();
         expanded.insert(completion.tree.root.id);
         let treemap = ui::treemap_view::TreemapState::new(completion.tree.root.id);
+        let default_prefs = AppPrefs::default();
 
         Self {
             tree: completion.tree,
@@ -566,6 +586,8 @@ impl LoadedState {
             pending_scan: None,
             file_icons: FileIconCache::default(),
             memory_relief: MemoryRelief::new(),
+            last_file_label_depth: default_prefs.treemap_label_depth,
+            last_folder_label_depth: default_prefs.treemap_folder_depth,
         }
     }
 
@@ -601,7 +623,7 @@ impl LoadedState {
         enabled: bool,
     ) -> Option<NodeCommand> {
         let mut command = None;
-        self.show_status_bar(ctx, prefs, prefs_changed, &mut command, enabled);
+        self.show_status_bar(ctx, prefs, prefs_changed, enabled);
         self.show_main_layout(
             ctx,
             prefs,
@@ -619,7 +641,6 @@ impl LoadedState {
         ctx: &egui::Context,
         prefs: &mut AppPrefs,
         prefs_changed: &mut bool,
-        command: &mut Option<NodeCommand>,
         enabled: bool,
     ) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -647,61 +668,49 @@ impl LoadedState {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let has_selection = self.pane.selected.is_some();
-
-                    let trash_text = egui::RichText::new("\u{1F5D1}").color(if has_selection {
-                        egui::Color32::from_rgb(220, 60, 60)
-                    } else {
-                        egui::Color32::from_rgb(160, 120, 120)
-                    });
-                    let trash_btn = ui.add_enabled(has_selection, egui::Button::new(trash_text));
-                    if trash_btn.clicked()
-                        && let Some(id) = self.pane.selected
-                    {
-                        *command = Some(NodeCommand::Delete { id, confirm: true });
-                    }
-
-                    let reveal_btn = ui.add_enabled(
-                        has_selection,
-                        egui::Button::new("\u{1F50D} Reveal in Finder"),
-                    );
-                    if reveal_btn.clicked()
-                        && let Some(id) = self.pane.selected
-                    {
-                        *command = Some(NodeCommand::Reveal(id));
-                    }
-
-                    ui.separator();
-                    let before_split = prefs.split_orientation;
-                    ui.selectable_value(
-                        &mut prefs.split_orientation,
-                        SplitOrientation::TopBottom,
-                        "Top/Bottom",
-                    );
-                    ui.selectable_value(
-                        &mut prefs.split_orientation,
-                        SplitOrientation::LeftRight,
-                        "Left/Right",
-                    );
-                    if prefs.split_orientation != before_split {
+                    if split_layout_toggle(ui, &mut prefs.split_orientation) {
                         *prefs_changed = true;
                     }
 
                     ui.separator();
-                    let mut label_depth = prefs.treemap_label_depth as u32;
-                    let mut folder_depth = prefs.treemap_folder_depth as u32;
-                    if ui
-                        .add(egui::Slider::new(&mut label_depth, 0..=5).text("Labels"))
-                        .changed()
-                    {
-                        prefs.treemap_label_depth = label_depth as usize;
+                    if let Some(label_depth) = icon_depth_slider(
+                        ui,
+                        StatusIcon::FileLabels,
+                        prefs.treemap_label_depth,
+                        if prefs.treemap_label_depth > 0 {
+                            prefs.treemap_label_depth
+                        } else {
+                            self.last_file_label_depth
+                        },
+                        0..=5,
+                        "File labels",
+                    ) {
+                        if label_depth > 0 {
+                            self.last_file_label_depth = label_depth;
+                        } else if prefs.treemap_label_depth > 0 {
+                            self.last_file_label_depth = prefs.treemap_label_depth;
+                        }
+                        prefs.treemap_label_depth = label_depth;
                         *prefs_changed = true;
                     }
-                    if ui
-                        .add(egui::Slider::new(&mut folder_depth, 0..=6).text("Boxes"))
-                        .changed()
-                    {
-                        prefs.treemap_folder_depth = folder_depth as usize;
+                    if let Some(folder_depth) = icon_depth_slider(
+                        ui,
+                        StatusIcon::FolderLabels,
+                        prefs.treemap_folder_depth,
+                        if prefs.treemap_folder_depth > 0 {
+                            prefs.treemap_folder_depth
+                        } else {
+                            self.last_folder_label_depth
+                        },
+                        0..=6,
+                        "Folder boxes",
+                    ) {
+                        if folder_depth > 0 {
+                            self.last_folder_label_depth = folder_depth;
+                        } else if prefs.treemap_folder_depth > 0 {
+                            self.last_folder_label_depth = prefs.treemap_folder_depth;
+                        }
+                        prefs.treemap_folder_depth = folder_depth;
                         *prefs_changed = true;
                         self.treemap.clear_layout();
                         self.memory_relief.restart();
@@ -740,6 +749,7 @@ impl LoadedState {
                             prefs,
                             scope,
                             scope_logo,
+                            SplitOrientation::LeftRight,
                             prefs_changed,
                         ) {
                             *command = Some(cmd);
@@ -773,6 +783,7 @@ impl LoadedState {
                             prefs,
                             scope,
                             scope_logo,
+                            SplitOrientation::TopBottom,
                             prefs_changed,
                         ) {
                             *command = Some(cmd);
@@ -824,23 +835,29 @@ impl LoadedState {
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
+        orientation: SplitOrientation,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
         let mut command = None;
         let mut pending_scan = None;
 
-        show_table_scope_row(
-            ui,
-            |ui| {
-                if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
-                    command = Some(cmd);
-                }
-            },
-            |ui| {
-                show_scope_logo(ui, scope_logo);
-                pending_scan = show_scope_panel(ui, scope, true);
-            },
-        );
+        let mut show_table = |ui: &mut egui::Ui| {
+            if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
+                command = Some(cmd);
+            }
+        };
+        let mut show_scope = |ui: &mut egui::Ui| {
+            show_scope_logo(ui, scope_logo);
+            pending_scan = show_scope_panel(ui, scope, true);
+        };
+        match orientation {
+            SplitOrientation::LeftRight => {
+                show_table_scope_column(ui, &mut show_table, &mut show_scope);
+            }
+            SplitOrientation::TopBottom => {
+                show_table_scope_row(ui, &mut show_table, &mut show_scope);
+            }
+        }
 
         if let Some(paths) = pending_scan {
             self.pending_scan = Some(paths);
@@ -869,10 +886,257 @@ impl LoadedState {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StatusIcon {
+    FileLabels,
+    FolderLabels,
+    SplitLayout,
+}
+
+fn split_layout_toggle(ui: &mut egui::Ui, orientation: &mut SplitOrientation) -> bool {
+    let rotation = match orientation {
+        SplitOrientation::LeftRight => 0,
+        SplitOrientation::TopBottom => 1,
+    };
+    let response = status_icon_button(ui, StatusIcon::SplitLayout, rotation, true);
+    let tooltip = match orientation {
+        SplitOrientation::LeftRight => "Switch to top/bottom layout",
+        SplitOrientation::TopBottom => "Switch to left/right layout",
+    };
+    let clicked = response.on_hover_text(tooltip).clicked();
+    if clicked {
+        *orientation = match orientation {
+            SplitOrientation::LeftRight => SplitOrientation::TopBottom,
+            SplitOrientation::TopBottom => SplitOrientation::LeftRight,
+        };
+    }
+    clicked
+}
+
+fn icon_depth_slider(
+    ui: &mut egui::Ui,
+    icon: StatusIcon,
+    current: usize,
+    restore_value: usize,
+    range: std::ops::RangeInclusive<u32>,
+    label: &'static str,
+) -> Option<usize> {
+    let mut value = (current as u32).clamp(*range.start(), *range.end());
+    let mut next_value = None;
+    let response = status_icon_button(ui, icon, 0, current > 0);
+    if response.clicked() {
+        let restored = (restore_value as u32).clamp((*range.start()).max(1), *range.end()) as usize;
+        next_value = Some(if current == 0 { restored } else { 0 });
+    }
+    let popup_id = response.id.with("depth_slider_popup");
+    let pointer_pos = ui.ctx().pointer_hover_pos();
+    let popup_hovered = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::Rect>(popup_id))
+        .is_some_and(|rect| pointer_pos.is_some_and(|pos| rect.expand(6.0).contains(pos)));
+
+    if response.hovered() || popup_hovered {
+        let popup_pos = response.rect.left_top() + egui::vec2(0.0, -6.0);
+        let inner = egui::Area::new(popup_id)
+            .order(egui::Order::Tooltip)
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(popup_pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(46.0, 150.0));
+                    ui.vertical_centered(|ui| {
+                        ui.small(label);
+                        ui.label(value.to_string());
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut value, range)
+                                    .vertical()
+                                    .show_value(false),
+                            )
+                            .changed()
+                        {
+                            next_value = Some(value as usize);
+                        }
+                    });
+                });
+            });
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(popup_id, inner.response.rect));
+    } else {
+        ui.ctx()
+            .data_mut(|data| data.remove::<egui::Rect>(popup_id));
+    }
+
+    next_value
+}
+
+fn status_icon_button(
+    ui: &mut egui::Ui,
+    icon: StatusIcon,
+    quarter_turns: u8,
+    active: bool,
+) -> egui::Response {
+    let size = egui::vec2(28.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter();
+
+    painter.rect_filled(rect, 4.0, visuals.bg_fill);
+    if response.hovered() || response.has_focus() {
+        painter.rect_stroke(rect, 4.0, visuals.bg_stroke, egui::StrokeKind::Inside);
+    }
+
+    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0));
+    let stroke_color = if active {
+        visuals.fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let stroke = egui::Stroke::new(0.75, stroke_color);
+    match icon {
+        StatusIcon::FileLabels => paint_file_label_icon(painter, icon_rect, stroke),
+        StatusIcon::FolderLabels => paint_folder_label_icon(painter, icon_rect, stroke),
+        StatusIcon::SplitLayout => {
+            paint_split_layout_icon(painter, icon_rect, stroke, quarter_turns)
+        }
+    }
+    if !active {
+        painter.line_segment(
+            [icon_rect.left_bottom(), icon_rect.right_top()],
+            egui::Stroke::new(1.1, stroke_color),
+        );
+    }
+
+    response
+}
+
+fn icon_pos(rect: egui::Rect, x: f32, y: f32, quarter_turns: u8) -> egui::Pos2 {
+    let (x, y) = match quarter_turns % 4 {
+        1 => (24.0 - y, x),
+        2 => (24.0 - x, 24.0 - y),
+        3 => (y, 24.0 - x),
+        _ => (x, y),
+    };
+    egui::pos2(
+        rect.left() + rect.width() * x / 24.0,
+        rect.top() + rect.height() * y / 24.0,
+    )
+}
+
+fn paint_polyline(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    points: &[(f32, f32)],
+) {
+    painter.line(
+        points
+            .iter()
+            .map(|&(x, y)| icon_pos(rect, x, y, 0))
+            .collect::<Vec<_>>(),
+        stroke,
+    );
+}
+
+fn paint_eye_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[
+            (10.6, 17.15),
+            (12.0, 15.25),
+            (14.0, 14.0),
+            (16.0, 13.65),
+            (18.0, 14.0),
+            (20.0, 15.25),
+            (21.4, 17.15),
+            (20.0, 19.05),
+            (18.0, 20.3),
+            (16.0, 20.65),
+            (14.0, 20.3),
+            (12.0, 19.05),
+            (10.6, 17.15),
+        ],
+    );
+    painter.circle_stroke(
+        icon_pos(rect, 16.0, 17.15, 0),
+        rect.width() * 1.35 / 24.0,
+        stroke,
+    );
+}
+
+fn paint_file_label_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[(4.5, 3.75), (12.5, 3.75), (16.5, 7.75), (16.5, 11.8)],
+    );
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[(12.5, 3.75), (12.5, 7.75), (16.5, 7.75)],
+    );
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[(4.5, 3.75), (4.5, 20.25), (11.5, 20.25)],
+    );
+    paint_eye_icon(painter, rect, stroke);
+}
+
+fn paint_folder_label_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[
+            (3.25, 6.25),
+            (9.25, 6.25),
+            (11.25, 8.25),
+            (20.75, 8.25),
+            (20.75, 15.4),
+        ],
+    );
+    paint_polyline(
+        painter,
+        rect,
+        stroke,
+        &[(3.25, 6.25), (3.25, 18.75), (10.6, 18.75)],
+    );
+    paint_eye_icon(painter, rect, stroke);
+}
+
+fn paint_split_layout_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    quarter_turns: u8,
+) {
+    let p = |x, y| icon_pos(rect, x, y, quarter_turns);
+    let rect_min = p(3.25, 4.25);
+    let rect_max = p(20.75, 19.75);
+    painter.rect_stroke(
+        egui::Rect::from_min_max(
+            egui::pos2(rect_min.x.min(rect_max.x), rect_min.y.min(rect_max.y)),
+            egui::pos2(rect_min.x.max(rect_max.x), rect_min.y.max(rect_max.y)),
+        ),
+        2.0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment([p(12.0, 4.25), p(12.0, 19.75)], stroke);
+    painter.line_segment([p(14.75, 12.0), p(20.75, 12.0)], stroke);
+    painter.line(vec![p(17.75, 9.0), p(20.75, 12.0), p(17.75, 15.0)], stroke);
+}
+
 fn show_table_scope_row(
     ui: &mut egui::Ui,
-    show_table: impl FnOnce(&mut egui::Ui),
-    show_scope: impl FnOnce(&mut egui::Ui),
+    mut show_table: impl FnMut(&mut egui::Ui),
+    mut show_scope: impl FnMut(&mut egui::Ui),
 ) {
     let row_size = ui.available_size_before_wrap();
     ui.allocate_ui_with_layout(
@@ -900,6 +1164,63 @@ fn show_table_scope_row(
             ui.add_space(SCOPE_PANEL_GAP);
 
             let scope_size = egui::vec2(SCOPE_PANEL_WIDTH, row_height);
+            ui.allocate_ui_with_layout(
+                scope_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_size(scope_size);
+                    ui.set_max_size(scope_size);
+                    show_scope(ui);
+                },
+            );
+        },
+    );
+}
+
+fn show_table_scope_column(
+    ui: &mut egui::Ui,
+    mut show_table: impl FnMut(&mut egui::Ui),
+    mut show_scope: impl FnMut(&mut egui::Ui),
+) {
+    let column_size = ui.available_size_before_wrap();
+    ui.allocate_ui_with_layout(
+        column_size,
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_size(column_size);
+            ui.set_max_size(column_size);
+
+            let available_h = column_size.y.max(0.0);
+            let scope_height = if available_h
+                >= FILE_TABLE_MIN_HEIGHT + SCOPE_PANEL_GAP + LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT
+            {
+                (available_h - FILE_TABLE_MIN_HEIGHT - SCOPE_PANEL_GAP)
+                    .min(LEFT_RIGHT_SCOPE_PANEL_HEIGHT)
+                    .max(LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT)
+            } else {
+                (available_h * 0.42).max(0.0)
+            };
+            let gap = if scope_height > 0.0 {
+                SCOPE_PANEL_GAP
+            } else {
+                0.0
+            };
+            let table_height = (available_h - scope_height - gap).max(0.0);
+
+            let table_size = egui::vec2(column_size.x, table_height);
+            ui.allocate_ui_with_layout(
+                table_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_size(table_size);
+                    ui.set_max_size(table_size);
+                    show_table(ui);
+                },
+            );
+
+            ui.add_space(gap);
+
+            let scope_size = egui::vec2(column_size.x, scope_height);
             ui.allocate_ui_with_layout(
                 scope_size,
                 egui::Layout::top_down(egui::Align::Min),
@@ -1201,6 +1522,7 @@ fn show_empty_panes(
     ctx: &egui::Context,
     scope: &mut ScanScopeState,
     scope_logo: &egui::TextureHandle,
+    orientation: SplitOrientation,
     scan_request: &mut Option<Vec<PathBuf>>,
     enabled: bool,
 ) {
@@ -1217,16 +1539,21 @@ fn show_empty_panes(
             if !enabled {
                 ui.disable();
             }
-            show_table_scope_row(
-                ui,
-                |_ui| {},
-                |ui| {
-                    show_scope_logo(ui, scope_logo);
-                    if let Some(paths) = show_scope_panel(ui, scope, enabled) {
-                        *scan_request = Some(paths);
-                    }
-                },
-            );
+            let mut show_table = |_ui: &mut egui::Ui| {};
+            let mut show_scope = |ui: &mut egui::Ui| {
+                show_scope_logo(ui, scope_logo);
+                if let Some(paths) = show_scope_panel(ui, scope, enabled) {
+                    *scan_request = Some(paths);
+                }
+            };
+            match orientation {
+                SplitOrientation::LeftRight => {
+                    show_table_scope_column(ui, &mut show_table, &mut show_scope);
+                }
+                SplitOrientation::TopBottom => {
+                    show_table_scope_row(ui, &mut show_table, &mut show_scope);
+                }
+            }
         });
 
     egui::CentralPanel::default().show(ctx, |_ui| {});
