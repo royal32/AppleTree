@@ -30,6 +30,7 @@ enum AppState {
         start_time: Instant,
         receiver: Receiver<ScanResult>,
         worker: Option<JoinHandle<()>>,
+        previous: Option<Box<LoadedState>>,
     },
     ScanFailed {
         path: PathBuf,
@@ -111,6 +112,15 @@ impl App {
     }
 
     fn start_scan(&mut self, path: PathBuf) {
+        let previous = match std::mem::replace(
+            &mut self.state,
+            AppState::WaitingForPicker { frames: u8::MAX },
+        ) {
+            AppState::Loaded(loaded) => Some(loaded),
+            AppState::Scanning { previous, .. } => previous,
+            _ => None,
+        };
+
         let start_time = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let worker_path = path.clone();
@@ -142,13 +152,18 @@ impl App {
             start_time,
             receiver,
             worker,
+            previous,
         };
     }
 
     fn poll_scan(&mut self) {
         let mut scan_result = None;
         if let AppState::Scanning {
-            receiver, worker, ..
+            path,
+            receiver,
+            worker,
+            previous,
+            ..
         } = &mut self.state
         {
             scan_result = match receiver.try_recv() {
@@ -156,31 +171,34 @@ impl App {
                     if let Some(worker) = worker.take() {
                         let _ = worker.join();
                     }
-                    Some(result)
+                    Some((result, path.clone(), previous.take()))
                 }
                 Err(TryRecvError::Empty) => None,
                 Err(TryRecvError::Disconnected) => {
                     if let Some(worker) = worker.take() {
                         let _ = worker.join();
                     }
-                    Some(Err(
-                        "Scan worker stopped before returning a result".to_owned()
+                    Some((
+                        Err("Scan worker stopped before returning a result".to_owned()),
+                        path.clone(),
+                        previous.take(),
                     ))
                 }
             };
         }
 
-        if let Some(result) = scan_result {
+        if let Some((result, path, previous)) = scan_result {
             match result {
                 Ok(completion) => {
                     self.state = AppState::Loaded(Box::new(LoadedState::from_scan(completion)));
                 }
                 Err(message) => {
-                    let path = match &self.state {
-                        AppState::Scanning { path, .. } => path.clone(),
-                        _ => PathBuf::new(),
-                    };
-                    self.state = AppState::ScanFailed { path, message };
+                    if let Some(mut loaded) = previous {
+                        loaded.status_message = Some(message);
+                        self.state = AppState::Loaded(loaded);
+                    } else {
+                        self.state = AppState::ScanFailed { path, message };
+                    }
                 }
             }
         }
@@ -244,9 +262,23 @@ impl eframe::App for App {
                 // frames == u8::MAX: dialog was dismissed, waiting for close
             }
             AppState::Scanning {
-                path, start_time, ..
+                path,
+                start_time,
+                previous,
+                ..
             } => {
-                show_scanning(ctx, path, start_time.elapsed());
+                if let Some(previous) = previous {
+                    previous.pane.hovered = None;
+                    let _ = previous.show_disabled_panels(
+                        ctx,
+                        &mut self.prefs,
+                        &mut self.prefs_changed,
+                    );
+                    previous.memory_relief.run(ctx);
+                } else {
+                    show_empty_panes(ctx);
+                }
+                show_scanning_overlay(ctx, path, start_time.elapsed());
             }
             AppState::ScanFailed { path, message } => {
                 let mut retry_path = None;
@@ -325,9 +357,28 @@ impl LoadedState {
         prefs: &mut AppPrefs,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
+        self.show_panels_enabled(ctx, prefs, prefs_changed, true)
+    }
+
+    fn show_disabled_panels(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+    ) -> Option<NodeCommand> {
+        self.show_panels_enabled(ctx, prefs, prefs_changed, false)
+    }
+
+    fn show_panels_enabled(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &mut AppPrefs,
+        prefs_changed: &mut bool,
+        enabled: bool,
+    ) -> Option<NodeCommand> {
         let mut command = None;
-        self.show_status_bar(ctx, prefs, prefs_changed, &mut command);
-        self.show_main_layout(ctx, prefs, prefs_changed, &mut command);
+        self.show_status_bar(ctx, prefs, prefs_changed, &mut command, enabled);
+        self.show_main_layout(ctx, prefs, prefs_changed, &mut command, enabled);
         command
     }
 
@@ -337,8 +388,12 @@ impl LoadedState {
         prefs: &mut AppPrefs,
         prefs_changed: &mut bool,
         command: &mut Option<NodeCommand>,
+        enabled: bool,
     ) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            if !enabled {
+                ui.disable();
+            }
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{} Files",
@@ -430,6 +485,7 @@ impl LoadedState {
         prefs: &mut AppPrefs,
         prefs_changed: &mut bool,
         command: &mut Option<NodeCommand>,
+        enabled: bool,
     ) {
         match prefs.split_orientation {
             SplitOrientation::LeftRight => {
@@ -442,12 +498,18 @@ impl LoadedState {
                             .inner_margin(egui::Margin::from(8)),
                     )
                     .show(ctx, |ui| {
+                        if !enabled {
+                            ui.disable();
+                        }
                         if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
                             *command = Some(cmd);
                         }
                     });
 
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    if !enabled {
+                        ui.disable();
+                    }
                     self.show_breadcrumb_area(ui);
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
                         *command = Some(cmd);
@@ -458,12 +520,15 @@ impl LoadedState {
                 let table_response = egui::TopBottomPanel::top("file_table_top")
                     .default_height(prefs.top_bottom_table_height)
                     .min_height(180.0)
-                    .resizable(true)
+                    .resizable(enabled)
                     .frame(
                         egui::Frame::side_top_panel(ctx.style().as_ref())
                             .inner_margin(egui::Margin::from(8)),
                     )
                     .show(ctx, |ui| {
+                        if !enabled {
+                            ui.disable();
+                        }
                         if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
                             *command = Some(cmd);
                         }
@@ -475,6 +540,9 @@ impl LoadedState {
                 }
 
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    if !enabled {
+                        ui.disable();
+                    }
                     self.show_breadcrumb_area(ui);
                     if let Some(cmd) = self.show_treemap(ui, prefs) {
                         *command = Some(cmd);
@@ -804,34 +872,43 @@ fn show_empty_panes(ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |_ui| {});
 }
 
-fn show_scanning(ctx: &egui::Context, path: &std::path::Path, elapsed: Duration) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(format!("Scanning {}", path.display()));
-            ui.separator();
-            ui.label(format!("{:.1}s elapsed", elapsed.as_secs_f64()));
-        });
-    });
+fn show_scanning_overlay(ctx: &egui::Context, path: &std::path::Path, elapsed: Duration) {
+    let screen_rect = ctx.screen_rect();
 
-    egui::SidePanel::left("file_table")
-        .default_width(520.0)
-        .min_width(360.0)
-        .show_separator_line(false)
-        .frame(
-            egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
-        )
+    egui::Area::new(egui::Id::new("scan_overlay_blocker"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen_rect.min)
         .show(ctx, |ui| {
-            ui::tree_view::show_branding(ui);
+            let (rect, _response) =
+                ui.allocate_exact_size(screen_rect.size(), egui::Sense::click_and_drag());
+            ui.painter().rect_filled(
+                rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+            );
         });
 
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.centered_and_justified(|ui| {
-            ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new());
-                ui.heading("Scanning...");
-            });
+    egui::Area::new(egui::Id::new("scan_overlay"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(egui::Color32::from_rgba_unmultiplied(32, 32, 32, 230))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+                ))
+                .inner_margin(egui::Margin::symmetric(20, 16))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.heading("Scanning...");
+                    });
+                    ui.add_space(6.0);
+                    ui.label(path.display().to_string());
+                    ui.label(format!("{:.1}s elapsed", elapsed.as_secs_f64()));
+                });
         });
-    });
     ctx.request_repaint_after(Duration::from_millis(100));
 }
 
