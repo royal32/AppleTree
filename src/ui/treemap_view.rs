@@ -130,6 +130,10 @@ const FOLDER_HEADER_H: f64 = 9.0;
 const FOLDER_PAD: f64 = 1.0;
 const MIN_HEADER_W: f64 = 42.0;
 const MIN_HEADER_H: f64 = FOLDER_HEADER_H + FOLDER_PAD * 2.0 + 6.0;
+const LABEL_FONT_SIZE: f32 = 8.0;
+const FILE_LABEL_MIN_W: f32 = 72.0;
+const FILE_LABEL_MIN_H: f32 = 18.0;
+const FILE_LABEL_MIN_AREA: f32 = 4_200.0;
 const SHRUNK_MAX_FRACTION: f64 = 0.10;
 
 // Lighting parameters (WinDirStat defaults)
@@ -310,7 +314,7 @@ pub fn show(
     }
 
     paint_folder_labels_and_borders(&painter, display_root, &state.cache, 0, prefs, deleted);
-    paint_file_labels(&painter, display_root, &state.cache, 0, prefs);
+    paint_file_labels(&painter, display_root, &state.cache, prefs, deleted);
     paint_shrink_markers(
         &painter,
         display_root,
@@ -658,13 +662,13 @@ fn paint_folder_labels_and_borders(
     if depth <= prefs.treemap_folder_depth {
         if let Some(header) = folder_header_rect(layout_rect, depth, prefs) {
             let header_rect = to_egui_rect(&header);
-            let label = format!("{} ({})", node.name, format_size(node.size));
-            let label_pos = pos2(header_rect.left() + 4.0, header_rect.center().y);
+            let label = node_size_label(node);
+            let label_pos = pos2(header_rect.left() + 2.0, header_rect.center().y);
             painter.with_clip_rect(header_rect).text(
                 label_pos,
                 egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::monospace(8.0),
+                egui::FontId::monospace(LABEL_FONT_SIZE),
                 if deleted.is_node_deleted(node.id) {
                     Color32::from_rgb(255, 70, 70)
                 } else {
@@ -689,46 +693,64 @@ fn paint_file_labels(
     painter: &egui::Painter,
     node: &FileNode,
     cache: &TreemapCache,
-    depth: usize,
     prefs: &AppPrefs,
+    deleted: &DeletionOverlay,
 ) {
     if node.is_dir {
         for child in node.children.iter() {
-            paint_file_labels(painter, child, cache, depth + 1, prefs);
+            paint_file_labels(painter, child, cache, prefs, deleted);
         }
         return;
     }
 
-    if prefs.treemap_label_depth == 0 || depth > prefs.treemap_label_depth {
+    if prefs.treemap_label_depth == 0 {
         return;
     }
 
     let Some(rect) = cache.egui_rect(node.id) else {
         return;
     };
-    if rect.width() < 92.0 || rect.height() < 34.0 {
+    let Some(header) = file_label_header_rect(rect) else {
         return;
+    };
+    // Draw a semi-transparent dark background behind file labels for better readability.
+    // painter.rect_filled(
+    //     header,
+    //     0.0,
+    //     Color32::from_rgba_unmultiplied(50, 50, 50, 230),
+    // );
+    painter.with_clip_rect(header).text(
+        pos2(header.left() + 2.0, header.center().y),
+        egui::Align2::LEFT_CENTER,
+        node_size_label(node),
+        egui::FontId::monospace(LABEL_FONT_SIZE),
+        if deleted.is_node_deleted(node.id) {
+            Color32::from_rgb(255, 70, 70)
+        } else {
+            Color32::from_rgb(235, 235, 235)
+        },
+    );
+}
+
+fn node_size_label(node: &FileNode) -> String {
+    format!("{} ({})", node.name, format_size(node.size))
+}
+
+fn file_label_header_rect(rect: Rect) -> Option<Rect> {
+    if rect.width() < FILE_LABEL_MIN_W
+        || rect.height() < FILE_LABEL_MIN_H
+        || rect.width() * rect.height() < FILE_LABEL_MIN_AREA
+    {
+        return None;
     }
 
-    let label = format!("{} ({})", node.name, format_size(node.size));
-    let font_id = egui::FontId::proportional(10.5);
-    let galley = painter.layout_no_wrap(label, font_id, Color32::WHITE);
-    let badge_w = (galley.size().x + 8.0).min(rect.width() - 4.0);
-    let badge_h = (galley.size().y + 5.0).min(rect.height() - 4.0);
-    if badge_w <= 12.0 || badge_h <= 10.0 {
-        return;
-    }
-
-    let badge = Rect::from_min_size(
-        rect.left_top() + egui::vec2(2.0, 2.0),
-        egui::vec2(badge_w, badge_h),
-    );
-    painter.rect_filled(badge, 2.0, Color32::from_black_alpha(175));
-    painter.with_clip_rect(badge.shrink(3.0)).galley(
-        badge.left_top() + egui::vec2(4.0, 2.0),
-        galley,
-        Color32::WHITE,
-    );
+    Some(Rect::from_min_max(
+        pos2(rect.left() + 1.0, rect.top() + 1.0),
+        pos2(
+            rect.right() - 1.0,
+            rect.top() + 1.0 + FOLDER_HEADER_H as f32,
+        ),
+    ))
 }
 
 fn paint_shrink_markers(
