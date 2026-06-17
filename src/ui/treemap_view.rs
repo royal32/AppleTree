@@ -740,7 +740,7 @@ fn paint_shrink_markers(
     shrunk_nodes: &BTreeSet<NodeId>,
 ) {
     if shrunk_nodes.contains(&node.id)
-        && let Some(marker) = shrink_marker_rect(node, cache, depth, prefs)
+        && let Some(marker) = shrink_marker(node, cache, depth, prefs)
     {
         paint_shrink_marker(painter, marker);
     }
@@ -750,53 +750,59 @@ fn paint_shrink_markers(
     }
 }
 
-fn shrink_marker_rect(
+enum ShrinkMarker {
+    File(Rect),
+    Folder { tab: Rect, icon: Rect },
+}
+
+fn shrink_marker(
     node: &FileNode,
     cache: &TreemapCache,
     depth: usize,
     prefs: &AppPrefs,
-) -> Option<Rect> {
+) -> Option<ShrinkMarker> {
     let rect = cache.egui_rect(node.id)?;
     if rect.width() < 14.0 || rect.height() < 14.0 {
         return None;
     }
 
-    let size = rect.width().min(rect.height()).min(22.0).max(13.0);
     if node.is_dir {
         if let Some(layout_rect) = cache.rect(node.id)
             && let Some(header) = folder_header_rect(layout_rect, depth, prefs)
         {
             let header_rect = to_egui_rect(&header);
-            let below_header = Rect::from_min_size(
-                pos2(header_rect.left() + 4.0, header_rect.bottom() + 2.0),
-                vec2(size, size),
-            );
-            if rect.contains_rect(below_header) {
-                return Some(below_header);
+            if header_rect.width() < 16.0 || header_rect.height() < 7.0 {
+                return None;
             }
-
-            return Some(Rect::from_center_size(
-                pos2(
-                    (header_rect.right() - size * 0.5 - 2.0).max(header_rect.left() + size * 0.5),
-                    header_rect.center().y,
-                ),
-                vec2(size, size),
-            ));
+            let spill = 3.0;
+            let tab_h = (header_rect.height() + spill).min(rect.bottom() - header_rect.top());
+            let tab_w = (tab_h + 8.0).min(header_rect.width() * 0.38);
+            let tab = Rect::from_min_max(
+                pos2(header_rect.right() - tab_w, header_rect.top()),
+                pos2(header_rect.right(), header_rect.top() + tab_h),
+            );
+            let icon = tab.shrink2(vec2(3.0, 1.0));
+            return Some(ShrinkMarker::Folder { tab, icon });
         }
 
-        Some(Rect::from_min_size(
-            rect.left_top() + vec2(3.0, 3.0),
-            vec2(size, size),
-        ))
+        None
     } else {
-        Some(Rect::from_min_size(
+        let size = rect.width().min(rect.height()).min(22.0).max(13.0);
+        Some(ShrinkMarker::File(Rect::from_min_size(
             pos2(rect.right() - size - 3.0, rect.top() + 3.0),
             vec2(size, size),
-        ))
+        )))
     }
 }
 
-fn paint_shrink_marker(painter: &egui::Painter, rect: Rect) {
+fn paint_shrink_marker(painter: &egui::Painter, marker: ShrinkMarker) {
+    match marker {
+        ShrinkMarker::File(rect) => paint_file_shrink_marker(painter, rect),
+        ShrinkMarker::Folder { tab, icon } => paint_folder_shrink_marker(painter, tab, icon),
+    }
+}
+
+fn paint_file_shrink_marker(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(
         rect,
         3.0,
@@ -809,11 +815,23 @@ fn paint_shrink_marker(painter: &egui::Painter, rect: Rect) {
         egui::StrokeKind::Inside,
     );
 
-    let icon = rect.shrink(3.0);
+    paint_shrink_glyph(painter, rect.shrink(3.0), Color32::from_rgb(28, 28, 26));
+}
+
+fn paint_folder_shrink_marker(painter: &egui::Painter, tab: Rect, icon: Rect) {
+    painter.rect_filled(tab, 0.0, Color32::from_rgb(76, 76, 76));
+    painter.line_segment(
+        [tab.left_top(), tab.left_bottom()],
+        egui::Stroke::new(1.0, Color32::from_rgb(40, 40, 40)),
+    );
+    paint_shrink_glyph(painter, icon, Color32::WHITE);
+}
+
+fn paint_shrink_glyph(painter: &egui::Painter, icon: Rect, color: Color32) {
     let scale = (icon.width() / 382.0).min(icon.height() / 404.0);
     let offset = icon.center() - vec2(382.0 * scale * 0.5, 404.0 * scale * 0.5);
     let p = |x: f32, y: f32| pos2(offset.x + x * scale, offset.y + y * scale);
-    let stroke = egui::Stroke::new((9.0 * scale).clamp(1.0, 2.4), Color32::from_rgb(28, 28, 26));
+    let stroke = egui::Stroke::new((9.0 * scale).clamp(1.0, 2.4), color);
 
     painter.line(
         vec![
