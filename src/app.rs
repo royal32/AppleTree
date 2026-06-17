@@ -319,7 +319,7 @@ impl App {
         let worker_paths = paths.clone();
         let worker_sender = sender.clone();
         let worker = match std::thread::Builder::new()
-            .name("macdirstat-scan".to_owned())
+            .name("appletree-scan".to_owned())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let tree = FileTree::scan_paths(&worker_paths);
@@ -1689,7 +1689,7 @@ fn configure_about_panel_text() {
         send2_void(
             info,
             set_sel,
-            nsstring("MacDirStat"),
+            nsstring("AppleTree"),
             nsstring("CFBundleName"),
         );
 
@@ -1705,10 +1705,11 @@ fn configure_about_panel_text() {
             info,
             set_sel,
             nsstring(
-                "Author: Michael Strömberg\n\
+                "Author: Seth Phillips\n\
                  \u{00A9} 2026 \u{2014} Licensed under GPL-3.0\n\n\
-                 github.com/MichaelStromberg/macdirstat\n\
-                 crates.io/crates/macdirstat",
+                 Forked from MacDirStat:
+github.com/MichaelStromberg/macdirstat
+                 ",
             ),
             nsstring("NSHumanReadableCopyright"),
         );

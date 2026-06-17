@@ -6,15 +6,15 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("MacDirStat")
+            .with_title("AppleTree")
             .with_icon(icon),
         ..Default::default()
     };
 
     eframe::run_native(
-        "MacDirStat",
+        "AppleTree",
         options,
-        Box::new(move |cc| Ok(Box::new(macdirstat::app::App::new(cc, initial_path)))),
+        Box::new(move |cc| Ok(Box::new(appletree::app::App::new(cc, initial_path)))),
     )
 }
 

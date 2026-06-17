@@ -272,7 +272,7 @@ fn settings_path() -> Option<PathBuf> {
         PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("MacDirStat")
+            .join("AppleTree")
             .join("settings.txt"),
     )
 }

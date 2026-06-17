@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use macdirstat::bench;
-use macdirstat::settings::{AppPrefs, TableColumn};
+use appletree::bench;
+use appletree::settings::{AppPrefs, TableColumn};
 
 fn main() -> ExitCode {
     match run() {
