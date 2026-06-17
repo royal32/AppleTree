@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -20,9 +22,28 @@ pub struct App {
 }
 
 enum AppState {
-    WaitingForPicker { frames: u8 },
-    Scanning { path: PathBuf, start_time: Instant },
+    WaitingForPicker {
+        frames: u8,
+    },
+    Scanning {
+        path: PathBuf,
+        start_time: Instant,
+        receiver: Receiver<ScanResult>,
+        worker: Option<JoinHandle<()>>,
+    },
+    ScanFailed {
+        path: PathBuf,
+        message: String,
+    },
     Loaded(Box<LoadedState>),
+}
+
+type ScanResult = Result<ScanCompletion, String>;
+
+struct ScanCompletion {
+    tree: FileTree,
+    color_map: ColorMap,
+    scan_time_ms: f64,
 }
 
 struct LoadedState {
@@ -90,10 +111,79 @@ impl App {
     }
 
     fn start_scan(&mut self, path: PathBuf) {
+        let start_time = Instant::now();
+        let (sender, receiver) = mpsc::channel();
+        let worker_path = path.clone();
+        let worker_sender = sender.clone();
+        let worker = match std::thread::Builder::new()
+            .name("macdirstat-scan".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let tree = FileTree::scan(&worker_path);
+                    let color_map = ColorMap::from_extensions(&tree.extensions);
+                    ScanCompletion {
+                        tree,
+                        color_map,
+                        scan_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
+                    }
+                }))
+                .map_err(|_| format!("Scan failed unexpectedly for {}", worker_path.display()));
+                let _ = worker_sender.send(result);
+            }) {
+            Ok(worker) => Some(worker),
+            Err(e) => {
+                let _ = sender.send(Err(format!("Failed to start scan: {e}")));
+                None
+            }
+        };
+
         self.state = AppState::Scanning {
             path,
-            start_time: Instant::now(),
+            start_time,
+            receiver,
+            worker,
         };
+    }
+
+    fn poll_scan(&mut self) {
+        let mut scan_result = None;
+        if let AppState::Scanning {
+            receiver, worker, ..
+        } = &mut self.state
+        {
+            scan_result = match receiver.try_recv() {
+                Ok(result) => {
+                    if let Some(worker) = worker.take() {
+                        let _ = worker.join();
+                    }
+                    Some(result)
+                }
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(worker) = worker.take() {
+                        let _ = worker.join();
+                    }
+                    Some(Err(
+                        "Scan worker stopped before returning a result".to_owned()
+                    ))
+                }
+            };
+        }
+
+        if let Some(result) = scan_result {
+            match result {
+                Ok(completion) => {
+                    self.state = AppState::Loaded(Box::new(LoadedState::from_scan(completion)));
+                }
+                Err(message) => {
+                    let path = match &self.state {
+                        AppState::Scanning { path, .. } => path.clone(),
+                        _ => PathBuf::new(),
+                    };
+                    self.state = AppState::ScanFailed { path, message };
+                }
+            }
+        }
     }
 }
 
@@ -132,33 +222,7 @@ impl eframe::App for App {
             configure_about_panel_text();
         }
 
-        // Scanning is synchronous — blocks the UI thread
-        if let AppState::Scanning {
-            ref path,
-            start_time,
-        } = self.state
-        {
-            let tree = FileTree::scan(path);
-            let scan_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            let color_map = ColorMap::from_extensions(&tree.extensions);
-            let mut expanded = BTreeSet::new();
-            expanded.insert(tree.root.id);
-            let treemap = ui::treemap_view::TreemapState::new(tree.root.id);
-            self.state = AppState::Loaded(Box::new(LoadedState {
-                tree,
-                color_map,
-                pane: ui::PaneState::default(),
-                expanded,
-                table: ui::tree_view::TableState::default(),
-                deleted: ui::DeletionOverlay::default(),
-                treemap,
-                status_message: None,
-                scan_time_ms,
-                pending_scan: None,
-                file_icons: FileIconCache::default(),
-                memory_relief: MemoryRelief::new(),
-            }));
-        }
+        self.poll_scan();
 
         match &mut self.state {
             AppState::WaitingForPicker { frames } => {
@@ -179,12 +243,17 @@ impl eframe::App for App {
                 }
                 // frames == u8::MAX: dialog was dismissed, waiting for close
             }
-            AppState::Scanning { .. } => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.heading("Scanning...");
-                    });
-                });
+            AppState::Scanning {
+                path, start_time, ..
+            } => {
+                show_scanning(ctx, path, start_time.elapsed());
+            }
+            AppState::ScanFailed { path, message } => {
+                let mut retry_path = None;
+                show_scan_failed(ctx, path, message, &mut retry_path);
+                if let Some(path) = retry_path {
+                    self.start_scan(path);
+                }
             }
             AppState::Loaded(loaded) => {
                 loaded.pane.hovered = None;
@@ -229,6 +298,27 @@ impl eframe::App for App {
 }
 
 impl LoadedState {
+    fn from_scan(completion: ScanCompletion) -> Self {
+        let mut expanded = BTreeSet::new();
+        expanded.insert(completion.tree.root.id);
+        let treemap = ui::treemap_view::TreemapState::new(completion.tree.root.id);
+
+        Self {
+            tree: completion.tree,
+            color_map: completion.color_map,
+            pane: ui::PaneState::default(),
+            expanded,
+            table: ui::tree_view::TableState::default(),
+            deleted: ui::DeletionOverlay::default(),
+            treemap,
+            status_message: None,
+            scan_time_ms: completion.scan_time_ms,
+            pending_scan: None,
+            file_icons: FileIconCache::default(),
+            memory_relief: MemoryRelief::new(),
+        }
+    }
+
     fn show_panels(
         &mut self,
         ctx: &egui::Context,
@@ -712,6 +802,76 @@ fn show_empty_panes(ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |_ui| {});
+}
+
+fn show_scanning(ctx: &egui::Context, path: &std::path::Path, elapsed: Duration) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Scanning {}", path.display()));
+            ui.separator();
+            ui.label(format!("{:.1}s elapsed", elapsed.as_secs_f64()));
+        });
+    });
+
+    egui::SidePanel::left("file_table")
+        .default_width(520.0)
+        .min_width(360.0)
+        .show_separator_line(false)
+        .frame(
+            egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
+        )
+        .show(ctx, |ui| {
+            ui::tree_view::show_branding(ui);
+        });
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.centered_and_justified(|ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.heading("Scanning...");
+            });
+        });
+    });
+    ctx.request_repaint_after(Duration::from_millis(100));
+}
+
+fn show_scan_failed(
+    ctx: &egui::Context,
+    path: &std::path::Path,
+    message: &str,
+    retry_path: &mut Option<PathBuf>,
+) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 80, 80),
+            format!("Failed to scan {}", path.display()),
+        );
+    });
+
+    egui::SidePanel::left("file_table")
+        .default_width(520.0)
+        .min_width(360.0)
+        .show_separator_line(false)
+        .frame(
+            egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
+        )
+        .show(ctx, |ui| {
+            ui::tree_view::show_branding(ui);
+        });
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Scan Failed");
+                ui.add_space(8.0);
+                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
+                ui.add_space(12.0);
+                if ui.button("Open Folder...").clicked() {
+                    *retry_path = pick_folder();
+                }
+            });
+        });
+    });
 }
 
 fn reveal_in_finder(path: &std::path::Path, loaded: &mut LoadedState) {
