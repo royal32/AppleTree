@@ -21,6 +21,7 @@ pub struct App {
     state: AppState,
     prefs: AppPrefs,
     scope: ScanScopeState,
+    scope_logo: egui::TextureHandle,
     prefs_changed: bool,
     #[cfg(target_os = "macos")]
     about_configured: bool,
@@ -87,6 +88,10 @@ struct ScopeSpace {
 
 const SCOPE_PANEL_WIDTH: f32 = 280.0;
 const SCOPE_PANEL_GAP: f32 = 8.0;
+const SCOPE_LOGO_MAX_WIDTH: f32 = 150.0;
+const SCOPE_LOGO_BOTTOM_GAP: f32 = 8.0;
+const SCOPE_LIST_MIN_HEIGHT: f32 = 96.0;
+const SCOPE_CONTROLS_HEIGHT: f32 = 104.0;
 
 struct MemoryRelief {
     until: Instant,
@@ -256,6 +261,16 @@ fn path_space(path: &Path) -> Option<(String, u64, u64)> {
     Some((mount, total, free))
 }
 
+fn load_scope_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let bytes = include_bytes!("ui/assets/black_text_with_white_backdrop.png");
+    let image = image::load_from_memory(bytes)
+        .expect("Failed to decode scope logo")
+        .into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    ctx.load_texture("scope_logo", color_image, egui::TextureOptions::LINEAR)
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_path: Option<String>) -> Self {
         #[cfg(target_os = "macos")]
@@ -266,6 +281,7 @@ impl App {
             state: AppState::WaitingForPicker { frames: 2 },
             prefs: AppPrefs::load(),
             scope: ScanScopeState::new(initial_path_buf.as_deref()),
+            scope_logo: load_scope_logo_texture(&cc.egui_ctx),
             prefs_changed: false,
             #[cfg(target_os = "macos")]
             about_configured: false,
@@ -424,10 +440,11 @@ impl eframe::App for App {
         self.poll_scan();
 
         let mut immediate_scan_paths: Option<Vec<PathBuf>> = None;
+        let scope_logo = self.scope_logo.clone();
         match &mut self.state {
             AppState::WaitingForPicker { frames } => {
                 let mut scan_paths = None;
-                show_empty_panes(ctx, &mut self.scope, &mut scan_paths, true);
+                show_empty_panes(ctx, &mut self.scope, &scope_logo, &mut scan_paths, true);
                 if let Some(paths) = scan_paths {
                     *frames = u8::MAX;
                     immediate_scan_paths = Some(paths);
@@ -459,12 +476,13 @@ impl eframe::App for App {
                         ctx,
                         &mut self.prefs,
                         &mut self.scope,
+                        &scope_logo,
                         &mut self.prefs_changed,
                     );
                     previous.memory_relief.run(ctx);
                 } else {
                     let mut scan_paths = None;
-                    show_empty_panes(ctx, &mut self.scope, &mut scan_paths, false);
+                    show_empty_panes(ctx, &mut self.scope, &scope_logo, &mut scan_paths, false);
                 }
                 show_scanning_overlay(ctx, paths, start_time.elapsed());
             }
@@ -482,6 +500,7 @@ impl eframe::App for App {
                     ctx,
                     &mut self.prefs,
                     &mut self.scope,
+                    &scope_logo,
                     &mut self.prefs_changed,
                 ) {
                     command = Some(ui_command);
@@ -555,9 +574,10 @@ impl LoadedState {
         ctx: &egui::Context,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
+        scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
-        self.show_panels_enabled(ctx, prefs, scope, prefs_changed, true)
+        self.show_panels_enabled(ctx, prefs, scope, scope_logo, prefs_changed, true)
     }
 
     fn show_disabled_panels(
@@ -565,9 +585,10 @@ impl LoadedState {
         ctx: &egui::Context,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
+        scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
-        self.show_panels_enabled(ctx, prefs, scope, prefs_changed, false)
+        self.show_panels_enabled(ctx, prefs, scope, scope_logo, prefs_changed, false)
     }
 
     fn show_panels_enabled(
@@ -575,12 +596,21 @@ impl LoadedState {
         ctx: &egui::Context,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
+        scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
         enabled: bool,
     ) -> Option<NodeCommand> {
         let mut command = None;
         self.show_status_bar(ctx, prefs, prefs_changed, &mut command, enabled);
-        self.show_main_layout(ctx, prefs, scope, prefs_changed, &mut command, enabled);
+        self.show_main_layout(
+            ctx,
+            prefs,
+            scope,
+            scope_logo,
+            prefs_changed,
+            &mut command,
+            enabled,
+        );
         command
     }
 
@@ -686,6 +716,7 @@ impl LoadedState {
         ctx: &egui::Context,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
+        scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
         command: &mut Option<NodeCommand>,
         enabled: bool,
@@ -704,9 +735,13 @@ impl LoadedState {
                         if !enabled {
                             ui.disable();
                         }
-                        if let Some(cmd) =
-                            self.show_file_table_and_scope(ui, prefs, scope, prefs_changed)
-                        {
+                        if let Some(cmd) = self.show_file_table_and_scope(
+                            ui,
+                            prefs,
+                            scope,
+                            scope_logo,
+                            prefs_changed,
+                        ) {
                             *command = Some(cmd);
                         }
                     });
@@ -733,9 +768,13 @@ impl LoadedState {
                         if !enabled {
                             ui.disable();
                         }
-                        if let Some(cmd) =
-                            self.show_file_table_and_scope(ui, prefs, scope, prefs_changed)
-                        {
+                        if let Some(cmd) = self.show_file_table_and_scope(
+                            ui,
+                            prefs,
+                            scope,
+                            scope_logo,
+                            prefs_changed,
+                        ) {
                             *command = Some(cmd);
                         }
                     });
@@ -784,6 +823,7 @@ impl LoadedState {
         ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
+        scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
         let mut command = None;
@@ -797,6 +837,7 @@ impl LoadedState {
                 }
             },
             |ui| {
+                show_scope_logo(ui, scope_logo);
                 pending_scan = show_scope_panel(ui, scope, true);
             },
         );
@@ -872,6 +913,30 @@ fn show_table_scope_row(
     );
 }
 
+fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle) {
+    let width = ui.available_width().min(SCOPE_LOGO_MAX_WIDTH);
+    let aspect = logo.size_vec2().y / logo.size_vec2().x;
+    let size = egui::vec2(width, width * aspect);
+    let required_height =
+        size.y + SCOPE_LOGO_BOTTOM_GAP + SCOPE_CONTROLS_HEIGHT + SCOPE_LIST_MIN_HEIGHT;
+    if ui.available_height() < required_height {
+        return;
+    }
+
+    let (slot, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), size.y),
+        egui::Sense::hover(),
+    );
+    let image_rect = egui::Rect::from_center_size(slot.center(), size);
+    ui.painter().image(
+        logo.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    ui.add_space(SCOPE_LOGO_BOTTOM_GAP);
+}
+
 fn show_scope_panel(
     ui: &mut egui::Ui,
     scope: &mut ScanScopeState,
@@ -882,10 +947,8 @@ fn show_scope_panel(
     }
 
     let mut scan_request = None;
-    ui.label(egui::RichText::new("Scope").strong());
-    ui.add_space(3.0);
 
-    let list_h = (ui.available_height() - 104.0).max(96.0);
+    let list_h = (ui.available_height() - SCOPE_CONTROLS_HEIGHT).max(SCOPE_LIST_MIN_HEIGHT);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_height(list_h);
         ui.set_width(ui.available_width());
@@ -1137,6 +1200,7 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
 fn show_empty_panes(
     ctx: &egui::Context,
     scope: &mut ScanScopeState,
+    scope_logo: &egui::TextureHandle,
     scan_request: &mut Option<Vec<PathBuf>>,
     enabled: bool,
 ) {
@@ -1157,6 +1221,7 @@ fn show_empty_panes(
                 ui,
                 |_ui| {},
                 |ui| {
+                    show_scope_logo(ui, scope_logo);
                     if let Some(paths) = show_scope_panel(ui, scope, enabled) {
                         *scan_request = Some(paths);
                     }
