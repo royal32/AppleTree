@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 382 404" width="382" height="404" role="img" aria-label="Window restore symbol">
+  <title>Window restore symbol</title>
+  <g fill="none" stroke="#1c1c1a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Large outline -->
+    <path d="M96 207 V68 H329 V300 H181"/>
+
+    <!-- Small square outline -->
+    <rect x="38" y="247" width="116" height="116"/>
+
+    <!-- Diagonal arrow -->
+    <path d="M288 113 L176 226"/>
+    <path d="M177 184 L176 226 L218 225"/>
+  </g>
+</svg>

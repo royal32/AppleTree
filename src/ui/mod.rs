@@ -20,6 +20,7 @@ pub enum NodeCommand {
     CopyPath(NodeId),
     ZoomIn(NodeId),
     ZoomOut,
+    ToggleShrink(NodeId),
 }
 
 pub struct PaneState {
@@ -89,6 +90,7 @@ pub(crate) fn node_context_menu(
     id: NodeId,
     can_zoom_in: bool,
     zoom_in_label: &str,
+    is_shrunk: bool,
     command: &mut Option<NodeCommand>,
 ) {
     if can_zoom_in && ui.button(zoom_in_label).clicked() {
@@ -97,6 +99,15 @@ pub(crate) fn node_context_menu(
     }
     if ui.button("Zoom Out").clicked() {
         *command = Some(NodeCommand::ZoomOut);
+        ui.close_menu();
+    }
+    let shrink_label = if is_shrunk {
+        "Unshrink in Treemap"
+    } else {
+        "Shrink in Treemap"
+    };
+    if ui.button(shrink_label).clicked() {
+        *command = Some(NodeCommand::ToggleShrink(id));
         ui.close_menu();
     }
     ui.separator();

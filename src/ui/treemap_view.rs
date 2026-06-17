@@ -1,4 +1,6 @@
-use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2};
+use std::collections::BTreeSet;
+
+use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2, vec2};
 use treemap::{Mappable, TreemapLayout};
 
 use crate::format_size;
@@ -36,10 +38,11 @@ impl TreemapCache {
         root_path: Vec<usize>,
         bounds: treemap::Rect,
         prefs: &AppPrefs,
+        shrunk_nodes: &BTreeSet<NodeId>,
     ) {
         self.rects.clear();
         self.root_path = root_path;
-        layout_node(root, bounds, 0, prefs, self);
+        layout_node(root, bounds, 0, prefs, self, shrunk_nodes);
     }
 
     fn rect(&self, id: NodeId) -> Option<&treemap::Rect> {
@@ -69,6 +72,7 @@ impl TreemapCache {
 pub struct TreemapState {
     pub root_id: NodeId,
     pub zoom_history: Vec<NodeId>,
+    pub shrunk_nodes: BTreeSet<NodeId>,
     cached_layout_rect: Option<Rect>,
     cache: TreemapCache,
     texture: Option<TextureHandle>,
@@ -79,6 +83,7 @@ impl TreemapState {
         Self {
             root_id,
             zoom_history: Vec::new(),
+            shrunk_nodes: BTreeSet::new(),
             cached_layout_rect: None,
             cache: TreemapCache::default(),
             texture: None,
@@ -89,6 +94,21 @@ impl TreemapState {
         self.cached_layout_rect = None;
         self.cache.clear();
         self.texture = None;
+    }
+
+    pub fn is_shrunk(&self, id: NodeId) -> bool {
+        self.shrunk_nodes.contains(&id)
+    }
+
+    pub fn toggle_shrink(&mut self, id: NodeId) -> bool {
+        let is_shrunk = if self.shrunk_nodes.remove(&id) {
+            false
+        } else {
+            self.shrunk_nodes.insert(id);
+            true
+        };
+        self.clear_layout();
+        is_shrunk
     }
 }
 
@@ -110,6 +130,7 @@ const FOLDER_HEADER_H: f64 = 9.0;
 const FOLDER_PAD: f64 = 1.0;
 const MIN_HEADER_W: f64 = 42.0;
 const MIN_HEADER_H: f64 = FOLDER_HEADER_H + FOLDER_PAD * 2.0 + 6.0;
+const SHRUNK_MAX_FRACTION: f64 = 0.10;
 
 // Lighting parameters (WinDirStat defaults)
 const AMBIENT: f64 = 0.13;
@@ -182,7 +203,7 @@ pub fn show(
         if let Some(root) = tree.root.resolve_id(display_root_id) {
             state
                 .cache
-                .rebuild_layout(root, display_root_path, bounds, prefs);
+                .rebuild_layout(root, display_root_path, bounds, prefs, &state.shrunk_nodes);
             collect_cushion_leaves(
                 root,
                 &state.cache,
@@ -258,7 +279,14 @@ pub fn show(
     if let Some(id) = menu_target {
         response.context_menu(|ui| {
             let can_zoom_in = tree.root.resolve_id(id).is_some_and(|node| node.is_dir);
-            ui::node_context_menu(ui, id, can_zoom_in, "Zoom In", &mut command);
+            ui::node_context_menu(
+                ui,
+                id,
+                can_zoom_in,
+                "Zoom In",
+                state.is_shrunk(id),
+                &mut command,
+            );
         });
     }
 
@@ -283,6 +311,14 @@ pub fn show(
 
     paint_folder_labels_and_borders(&painter, display_root, &state.cache, 0, prefs, deleted);
     paint_file_labels(&painter, display_root, &state.cache, 0, prefs);
+    paint_shrink_markers(
+        &painter,
+        display_root,
+        &state.cache,
+        0,
+        prefs,
+        &state.shrunk_nodes,
+    );
 
     if let Some(hover_id) = pane.hovered
         && let Some(r) = state.cache.egui_rect(hover_id)
@@ -318,6 +354,7 @@ fn layout_node(
     depth: usize,
     prefs: &AppPrefs,
     cache: &mut TreemapCache,
+    shrunk_nodes: &BTreeSet<NodeId>,
 ) {
     cache.insert_rect(node.id, bounds);
 
@@ -330,13 +367,13 @@ fn layout_node(
         return;
     }
 
-    let mut items: Vec<LayoutItem> = node
-        .children
-        .iter()
+    let visual_sizes = visual_child_sizes(&node.children, shrunk_nodes);
+    let mut items: Vec<LayoutItem> = visual_sizes
+        .into_iter()
         .enumerate()
-        .map(|(child_index, c)| LayoutItem {
+        .map(|(child_index, size)| LayoutItem {
             child_index,
-            size: c.size as f64,
+            size,
             bounds: treemap::Rect::new(),
         })
         .collect();
@@ -347,9 +384,44 @@ fn layout_node(
     for item in items.iter() {
         let b: treemap::Rect = *item.bounds();
         if let Some(child) = node.children.get(item.child_index) {
-            layout_node(child, b, depth + 1, prefs, cache);
+            layout_node(child, b, depth + 1, prefs, cache, shrunk_nodes);
         }
     }
+}
+
+fn visual_child_sizes(children: &[FileNode], shrunk_nodes: &BTreeSet<NodeId>) -> Vec<f64> {
+    let mut weights = children
+        .iter()
+        .map(|child| child.size as f64)
+        .collect::<Vec<_>>();
+
+    let has_unshrunk_weight = children
+        .iter()
+        .any(|child| !shrunk_nodes.contains(&child.id) && child.size > 0);
+    if !has_unshrunk_weight {
+        return weights;
+    }
+
+    for _ in 0..48 {
+        let total = weights.iter().sum::<f64>();
+        if total <= f64::EPSILON {
+            break;
+        }
+
+        let cap = total * SHRUNK_MAX_FRACTION;
+        let mut changed = false;
+        for (index, child) in children.iter().enumerate() {
+            if shrunk_nodes.contains(&child.id) && weights[index] > cap {
+                weights[index] = cap;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    weights
 }
 
 fn folder_has_chrome(rect: &treemap::Rect, depth: usize, prefs: &AppPrefs) -> bool {
@@ -659,6 +731,110 @@ fn paint_file_labels(
     );
 }
 
+fn paint_shrink_markers(
+    painter: &egui::Painter,
+    node: &FileNode,
+    cache: &TreemapCache,
+    depth: usize,
+    prefs: &AppPrefs,
+    shrunk_nodes: &BTreeSet<NodeId>,
+) {
+    if shrunk_nodes.contains(&node.id)
+        && let Some(marker) = shrink_marker_rect(node, cache, depth, prefs)
+    {
+        paint_shrink_marker(painter, marker);
+    }
+
+    for child in node.children.iter() {
+        paint_shrink_markers(painter, child, cache, depth + 1, prefs, shrunk_nodes);
+    }
+}
+
+fn shrink_marker_rect(
+    node: &FileNode,
+    cache: &TreemapCache,
+    depth: usize,
+    prefs: &AppPrefs,
+) -> Option<Rect> {
+    let rect = cache.egui_rect(node.id)?;
+    if rect.width() < 14.0 || rect.height() < 14.0 {
+        return None;
+    }
+
+    let size = rect.width().min(rect.height()).min(22.0).max(13.0);
+    if node.is_dir {
+        if let Some(layout_rect) = cache.rect(node.id)
+            && let Some(header) = folder_header_rect(layout_rect, depth, prefs)
+        {
+            let header_rect = to_egui_rect(&header);
+            let below_header = Rect::from_min_size(
+                pos2(header_rect.left() + 4.0, header_rect.bottom() + 2.0),
+                vec2(size, size),
+            );
+            if rect.contains_rect(below_header) {
+                return Some(below_header);
+            }
+
+            return Some(Rect::from_center_size(
+                pos2(
+                    (header_rect.right() - size * 0.5 - 2.0).max(header_rect.left() + size * 0.5),
+                    header_rect.center().y,
+                ),
+                vec2(size, size),
+            ));
+        }
+
+        Some(Rect::from_min_size(
+            rect.left_top() + vec2(3.0, 3.0),
+            vec2(size, size),
+        ))
+    } else {
+        Some(Rect::from_min_size(
+            pos2(rect.right() - size - 3.0, rect.top() + 3.0),
+            vec2(size, size),
+        ))
+    }
+}
+
+fn paint_shrink_marker(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(
+        rect,
+        3.0,
+        Color32::from_rgba_unmultiplied(245, 245, 245, 215),
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(20, 20, 20, 190)),
+        egui::StrokeKind::Inside,
+    );
+
+    let icon = rect.shrink(3.0);
+    let scale = (icon.width() / 382.0).min(icon.height() / 404.0);
+    let offset = icon.center() - vec2(382.0 * scale * 0.5, 404.0 * scale * 0.5);
+    let p = |x: f32, y: f32| pos2(offset.x + x * scale, offset.y + y * scale);
+    let stroke = egui::Stroke::new((9.0 * scale).clamp(1.0, 2.4), Color32::from_rgb(28, 28, 26));
+
+    painter.line(
+        vec![
+            p(96.0, 207.0),
+            p(96.0, 68.0),
+            p(329.0, 68.0),
+            p(329.0, 300.0),
+            p(181.0, 300.0),
+        ],
+        stroke,
+    );
+
+    let small = Rect::from_min_size(p(38.0, 247.0), vec2(116.0 * scale, 116.0 * scale));
+    painter.rect_stroke(small, 0.0, stroke, egui::StrokeKind::Inside);
+    painter.line_segment([p(288.0, 113.0), p(176.0, 226.0)], stroke);
+    painter.line(
+        vec![p(177.0, 184.0), p(176.0, 226.0), p(218.0, 225.0)],
+        stroke,
+    );
+}
+
 fn paint_deleted_outlines(
     painter: &egui::Painter,
     cache: &TreemapCache,
@@ -682,4 +858,35 @@ fn to_egui_rect(r: &treemap::Rect) -> Rect {
         pos2(r.x as f32, r.y as f32),
         pos2((r.x + r.w) as f32, (r.y + r.h) as f32),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(id: NodeId, name: &str, size: u64) -> FileNode {
+        FileNode {
+            id,
+            name: name.into(),
+            size,
+            is_dir: false,
+            children: Box::new([]),
+            modified: None,
+            file_count: 1,
+            dir_count: 0,
+        }
+    }
+
+    #[test]
+    fn shrunk_child_is_capped_against_final_visual_total() {
+        let children = vec![file(1, "huge.bin", 90), file(2, "rest.bin", 10)];
+        let shrunk = BTreeSet::from([1]);
+
+        let weights = visual_child_sizes(&children, &shrunk);
+        let total = weights.iter().sum::<f64>();
+
+        assert!(weights[0] / total <= SHRUNK_MAX_FRACTION + 0.0001);
+        assert!((weights[0] - 1.1111).abs() < 0.001);
+        assert_eq!(weights[1], 10.0);
+    }
 }

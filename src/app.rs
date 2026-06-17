@@ -565,6 +565,7 @@ impl LoadedState {
                 pane: &mut self.pane,
                 expanded: &mut self.expanded,
                 deleted: &self.deleted,
+                shrunk_treemap_nodes: &self.treemap.shrunk_nodes,
                 file_icons: &mut self.file_icons,
                 table: &mut self.table,
             },
@@ -766,7 +767,25 @@ fn execute_node_command(loaded: &mut LoadedState, ctx: &egui::Context, command: 
         NodeCommand::ZoomOut => {
             zoom_out_treemap(loaded);
         }
+        NodeCommand::ToggleShrink(id) => {
+            toggle_treemap_shrink(loaded, id);
+        }
     }
+}
+
+fn toggle_treemap_shrink(loaded: &mut LoadedState, id: NodeId) {
+    let Some(node) = loaded.tree.root.resolve_id(id) else {
+        loaded.status_message = Some("Cannot shrink: item no longer exists".to_owned());
+        return;
+    };
+    let name = node.name.to_string();
+    let is_shrunk = loaded.treemap.toggle_shrink(id);
+    loaded.memory_relief.restart();
+    loaded.status_message = Some(if is_shrunk {
+        format!("Shrunk {name} in treemap")
+    } else {
+        format!("Restored {name} in treemap")
+    });
 }
 
 fn zoom_in_treemap(loaded: &mut LoadedState, id: NodeId) {

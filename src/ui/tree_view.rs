@@ -19,6 +19,7 @@ pub struct TreeViewState<'a> {
     pub pane: &'a mut PaneState,
     pub expanded: &'a mut BTreeSet<NodeId>,
     pub deleted: &'a DeletionOverlay,
+    pub shrunk_treemap_nodes: &'a BTreeSet<NodeId>,
     pub file_icons: &'a mut FileIconCache,
     pub table: &'a mut TableState,
 }
@@ -61,6 +62,7 @@ struct RowContext<'a> {
     pane: &'a mut PaneState,
     expanded: &'a mut BTreeSet<NodeId>,
     deleted: &'a DeletionOverlay,
+    shrunk_treemap_nodes: &'a BTreeSet<NodeId>,
     prefs: &'a AppPrefs,
     file_icons: &'a mut FileIconCache,
     style: RowStyle,
@@ -96,6 +98,7 @@ pub fn show(
         pane,
         expanded,
         deleted,
+        shrunk_treemap_nodes,
         file_icons,
         table,
     } = state;
@@ -141,6 +144,7 @@ pub fn show(
                     pane,
                     expanded,
                     deleted,
+                    shrunk_treemap_nodes,
                     prefs,
                     file_icons,
                     style: RowStyle {
@@ -276,7 +280,14 @@ fn show_row(
             }
             cell_resp.context_menu(|ui| {
                 context.pane.select(row.id, ActivePane::Table);
-                ui::node_context_menu(ui, row.id, row.is_dir, "Zoom In Treemap", &mut command);
+                ui::node_context_menu(
+                    ui,
+                    row.id,
+                    row.is_dir,
+                    "Zoom In Treemap",
+                    context.shrunk_treemap_nodes.contains(&row.id),
+                    &mut command,
+                );
             });
             let is_deleted = context.deleted.is_deleted(row.id);
             paint_cell(ui, rect, row, pref.column, context, is_selected, is_deleted);
