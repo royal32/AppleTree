@@ -28,6 +28,7 @@ pub struct TreeViewState<'a> {
 pub struct TableState {
     sort: Option<(TableColumn, bool)>,
     child_orders: BTreeMap<NodeId, Rc<[usize]>>,
+    pending_expand: Option<NodeId>,
 }
 
 impl TableState {
@@ -65,6 +66,7 @@ struct RowContext<'a> {
     shrunk_treemap_nodes: &'a BTreeSet<NodeId>,
     prefs: &'a AppPrefs,
     file_icons: &'a mut FileIconCache,
+    pending_expand: &'a mut Option<NodeId>,
     style: RowStyle,
 }
 
@@ -159,11 +161,21 @@ pub fn show(
                 ui.set_min_width(table_width);
                 show_header(ui, prefs, &layout, prefs_changed);
                 table.begin_frame(prefs);
+                if let Some(id) = table.pending_expand.take() {
+                    expanded.insert(id);
+                }
 
                 let mut rows = Vec::new();
                 collect_rows(&tree.root, None, 0, expanded, prefs, table, &mut rows);
 
-                let arrow_command = handle_keyboard(ui.ctx(), tree, pane, expanded, &rows);
+                let arrow_command = handle_keyboard(
+                    ui.ctx(),
+                    tree,
+                    pane,
+                    expanded,
+                    &mut table.pending_expand,
+                    &rows,
+                );
                 if command.is_none() {
                     command = arrow_command;
                 }
@@ -175,6 +187,7 @@ pub fn show(
                     shrunk_treemap_nodes,
                     prefs,
                     file_icons,
+                    pending_expand: &mut table.pending_expand,
                     style: RowStyle {
                         frame_fill,
                         alt_row_color,
@@ -390,27 +403,40 @@ fn paint_cell(
                 if arrow_resp.clicked() {
                     if context.expanded.contains(&row.id) {
                         context.expanded.remove(&row.id);
+                        if *context.pending_expand == Some(row.id) {
+                            *context.pending_expand = None;
+                        }
+                    } else if *context.pending_expand == Some(row.id) {
+                        *context.pending_expand = None;
                     } else {
-                        context.expanded.insert(row.id);
+                        *context.pending_expand = Some(row.id);
+                        ui.ctx().request_repaint();
                     }
                 }
-                let glyph = if context.expanded.contains(&row.id) {
-                    "▾"
+                if *context.pending_expand == Some(row.id) {
+                    egui::Spinner::new()
+                        .size(12.0)
+                        .color(text_color)
+                        .paint_at(ui, arrow_rect.shrink(1.0));
                 } else {
-                    "▸"
-                };
-                paint_text(
-                    ui,
-                    arrow_rect,
-                    arrow_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    glyph,
-                    TextStyle {
-                        font_id: egui::FontId::proportional(13.0),
-                        color: text_color,
-                    },
-                    is_deleted,
-                );
+                    let glyph = if context.expanded.contains(&row.id) {
+                        "▾"
+                    } else {
+                        "▸"
+                    };
+                    paint_text(
+                        ui,
+                        arrow_rect,
+                        arrow_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        TextStyle {
+                            font_id: egui::FontId::proportional(13.0),
+                            color: text_color,
+                        },
+                        is_deleted,
+                    );
+                }
             }
             x += 16.0;
             let icon_rect =
@@ -693,6 +719,7 @@ fn handle_keyboard(
     tree: &FileTree,
     pane: &mut PaneState,
     expanded: &mut BTreeSet<NodeId>,
+    pending_expand: &mut Option<NodeId>,
     rows: &[RowInfo<'_>],
 ) -> Option<NodeCommand> {
     if pane.active_pane != ActivePane::Table {
@@ -754,12 +781,18 @@ fn handle_keyboard(
                 && let Some(node) = tree.node(id)
                 && node.is_dir
                 && !node.children.is_empty()
+                && !expanded.contains(&id)
             {
-                expanded.insert(id);
+                *pending_expand = Some(id);
+                ctx.request_repaint();
             }
         }
         egui::Key::ArrowLeft => {
             if let Some(id) = pane.selected {
+                if *pending_expand == Some(id) {
+                    *pending_expand = None;
+                    return None;
+                }
                 if expanded.remove(&id) {
                     return None;
                 }
