@@ -7,7 +7,7 @@ use treemap::{Mappable, TreemapLayout};
 use crate::format_size;
 use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
 use crate::model::tree::{FileNode, FileTree, NodeId};
-use crate::settings::AppPrefs;
+use crate::settings::{AppPrefs, FilenameTruncation};
 use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
 
 /// Cushion surface coefficients: [a_x, a_y, c_x, c_y]
@@ -698,18 +698,27 @@ fn paint_folder_labels_and_borders(
     if depth <= prefs.treemap_folder_depth {
         if let Some(header) = folder_header_rect(layout_rect, depth, prefs) {
             let header_rect = to_egui_rect(&header);
-            let label = node_size_label(node);
             let label_pos = pos2(header_rect.left() + 2.0, header_rect.center().y);
+            let font_id = egui::FontId::monospace(LABEL_FONT_SIZE);
+            let color = if deleted.is_node_deleted(node.id) {
+                Color32::from_rgb(255, 70, 70)
+            } else {
+                Color32::from_rgb(235, 235, 235)
+            };
+            let label = node_size_label(
+                painter,
+                node,
+                prefs.filename_truncation,
+                font_id.clone(),
+                color,
+                (header_rect.right() - label_pos.x - 2.0).max(0.0),
+            );
             painter.with_clip_rect(header_rect).text(
                 label_pos,
                 egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::monospace(LABEL_FONT_SIZE),
-                if deleted.is_node_deleted(node.id) {
-                    Color32::from_rgb(255, 70, 70)
-                } else {
-                    Color32::from_rgb(235, 235, 235)
-                },
+                font_id,
+                color,
             );
         }
         painter.rect_stroke(
@@ -755,21 +764,147 @@ fn paint_file_labels(
     //     0.0,
     //     Color32::from_rgba_unmultiplied(50, 50, 50, 230),
     // );
+    let label_pos = pos2(header.left() + 2.0, header.center().y);
+    let font_id = egui::FontId::monospace(LABEL_FONT_SIZE);
+    let color = if deleted.is_node_deleted(node.id) {
+        Color32::from_rgb(255, 70, 70)
+    } else {
+        Color32::from_rgb(235, 235, 235)
+    };
+    let label = node_size_label(
+        painter,
+        node,
+        prefs.filename_truncation,
+        font_id.clone(),
+        color,
+        (header.right() - label_pos.x - 2.0).max(0.0),
+    );
     painter.with_clip_rect(header).text(
-        pos2(header.left() + 2.0, header.center().y),
+        label_pos,
         egui::Align2::LEFT_CENTER,
-        node_size_label(node),
-        egui::FontId::monospace(LABEL_FONT_SIZE),
-        if deleted.is_node_deleted(node.id) {
-            Color32::from_rgb(255, 70, 70)
-        } else {
-            Color32::from_rgb(235, 235, 235)
-        },
+        label,
+        font_id,
+        color,
     );
 }
 
-fn node_size_label(node: &FileNode) -> String {
-    format!("{} ({})", node.name, format_size(node.size))
+fn node_size_label(
+    painter: &egui::Painter,
+    node: &FileNode,
+    truncation: FilenameTruncation,
+    font_id: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> String {
+    let size_label = format!(" ({})", format_size(node.size));
+    let full_label = format!("{}{}", node.name, size_label);
+    if text_width(painter, &full_label, &font_id, color) <= max_width {
+        return full_label;
+    }
+
+    let size_width = text_width(painter, &size_label, &font_id, color);
+    let name_max_width = max_width - size_width;
+    if name_max_width <= 0.0 {
+        return truncate_text_to_width(
+            painter,
+            &full_label,
+            truncation,
+            &font_id,
+            color,
+            max_width,
+        );
+    }
+
+    let name = truncate_text_to_width(
+        painter,
+        &node.name,
+        truncation,
+        &font_id,
+        color,
+        name_max_width,
+    );
+    if name.is_empty() {
+        truncate_text_to_width(painter, &full_label, truncation, &font_id, color, max_width)
+    } else {
+        format!("{name}{size_label}")
+    }
+}
+
+fn truncate_text_to_width(
+    painter: &egui::Painter,
+    text: &str,
+    truncation: FilenameTruncation,
+    font_id: &egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if text_width(painter, text, font_id, color) <= max_width {
+        return text.to_owned();
+    }
+
+    const MARKER: &str = "...";
+    if text_width(painter, MARKER, font_id, color) > max_width {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut best = MARKER.to_owned();
+    let mut low = 0usize;
+    let mut high = chars.len().saturating_sub(1);
+    while low <= high {
+        let visible = (low + high) / 2;
+        let candidate = match truncation {
+            FilenameTruncation::Middle => middle_truncate_chars(&chars, visible),
+            FilenameTruncation::End => end_truncate_chars(&chars, visible),
+        };
+        if text_width(painter, &candidate, font_id, color) <= max_width {
+            best = candidate;
+            low = visible + 1;
+        } else if visible == 0 {
+            break;
+        } else {
+            high = visible - 1;
+        }
+    }
+    best
+}
+
+fn middle_truncate_chars(chars: &[char], visible: usize) -> String {
+    if visible == 0 {
+        return "...".to_owned();
+    }
+
+    let suffix_len = ((visible * 2) / 3).max(1).min(chars.len());
+    let prefix_len = visible
+        .saturating_sub(suffix_len)
+        .min(chars.len() - suffix_len);
+
+    let mut truncated = String::with_capacity(visible + 3);
+    truncated.extend(chars.iter().take(prefix_len));
+    truncated.push_str("...");
+    truncated.extend(chars.iter().skip(chars.len() - suffix_len));
+    truncated
+}
+
+fn end_truncate_chars(chars: &[char], visible: usize) -> String {
+    if visible == 0 {
+        return "...".to_owned();
+    }
+
+    let mut truncated = String::with_capacity(visible + 3);
+    truncated.extend(chars.iter().take(visible.min(chars.len())));
+    truncated.push_str("...");
+    truncated
+}
+
+fn text_width(painter: &egui::Painter, text: &str, font_id: &egui::FontId, color: Color32) -> f32 {
+    painter
+        .layout_no_wrap(text.to_owned(), font_id.clone(), color)
+        .size()
+        .x
 }
 
 fn file_label_header_rect(rect: Rect, label_depth: usize) -> Option<Rect> {
