@@ -899,11 +899,13 @@ fn icon_depth_slider(
     range: std::ops::RangeInclusive<u32>,
     label: &'static str,
 ) -> Option<usize> {
-    let mut value = (current as u32).clamp(*range.start(), *range.end());
+    let range_start = *range.start();
+    let range_end = *range.end();
+    let mut value = (current as u32).clamp(range_start, range_end);
     let mut next_value = None;
     let response = status_icon_button(ui, icon, 0, current > 0);
     if response.clicked() {
-        let restored = (restore_value as u32).clamp((*range.start()).max(1), *range.end()) as usize;
+        let restored = (restore_value as u32).clamp(range_start.max(1), range_end) as usize;
         next_value = Some(if current == 0 { restored } else { 0 });
     }
     let popup_id = response.id.with("depth_slider_popup");
@@ -925,14 +927,13 @@ fn icon_depth_slider(
                     ui.vertical_centered(|ui| {
                         ui.small(label);
                         ui.label(value.to_string());
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut value, range)
-                                    .vertical()
-                                    .show_value(false),
-                            )
-                            .changed()
-                        {
+                        let slider_response = ui.add(
+                            egui::Slider::new(&mut value, range_start..=range_end)
+                                .vertical()
+                                .show_value(false),
+                        );
+                        paint_slider_notches(ui, slider_response.rect, range_start..=range_end);
+                        if slider_response.changed() {
                             next_value = Some(value as usize);
                         }
                     });
@@ -946,6 +947,39 @@ fn icon_depth_slider(
     }
 
     next_value
+}
+
+fn paint_slider_notches(
+    ui: &egui::Ui,
+    slider_rect: egui::Rect,
+    range: std::ops::RangeInclusive<u32>,
+) {
+    let start = *range.start();
+    let end = *range.end();
+    if end <= start {
+        return;
+    }
+
+    let line_start_x = slider_rect.right() + 6.0;
+    let line_end_x = ui.max_rect().right() - 6.0;
+    if line_end_x <= line_start_x {
+        return;
+    }
+
+    let stroke = egui::Stroke::new(0.75, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    let painter = ui.painter();
+    let span = (end - start) as f32;
+    let handle_radius = slider_rect.width() / 2.5;
+    let notch_bottom = slider_rect.bottom() - handle_radius;
+    let notch_top = slider_rect.top() + handle_radius;
+    for notch in start..=end {
+        let t = (notch - start) as f32 / span;
+        let y = egui::lerp(notch_bottom..=notch_top, t);
+        painter.line_segment(
+            [egui::pos2(line_start_x, y), egui::pos2(line_end_x, y)],
+            stroke,
+        );
+    }
 }
 
 fn status_icon_button(
