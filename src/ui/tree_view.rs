@@ -74,6 +74,41 @@ struct TextStyle {
     color: Color32,
 }
 
+struct TableLayout {
+    widths: Vec<f32>,
+    total_width: f32,
+}
+
+impl TableLayout {
+    fn new(prefs: &AppPrefs, available_width: f32) -> Self {
+        let mut widths = prefs
+            .columns
+            .iter()
+            .map(|pref| pref.width)
+            .collect::<Vec<_>>();
+        let base_width = widths.iter().map(|width| width + RESIZE_W).sum::<f32>();
+
+        if let Some(name_index) = prefs
+            .columns
+            .iter()
+            .position(|pref| pref.column == TableColumn::Name)
+            && available_width > base_width
+        {
+            widths[name_index] += available_width - base_width;
+        }
+
+        let total_width = widths.iter().map(|width| width + RESIZE_W).sum::<f32>();
+        Self {
+            widths,
+            total_width,
+        }
+    }
+
+    fn width(&self, index: usize) -> f32 {
+        self.widths[index]
+    }
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     tree: &FileTree,
@@ -114,18 +149,15 @@ pub fn show(
     frame.show(ui, |ui| {
         ui.set_min_height(content_height);
         ui.set_max_height(content_height);
-        let table_width = prefs
-            .columns
-            .iter()
-            .map(|pref| pref.width + RESIZE_W)
-            .sum::<f32>();
+        let layout = TableLayout::new(prefs, ui.available_width());
+        let table_width = layout.total_width;
 
         egui::ScrollArea::horizontal()
             .id_salt("file_table_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_min_width(table_width);
-                show_header(ui, prefs, prefs_changed);
+                show_header(ui, prefs, &layout, prefs_changed);
                 table.begin_frame(prefs);
 
                 let mut rows = Vec::new();
@@ -155,7 +187,7 @@ pub fn show(
                         ui.set_min_width(table_width);
                         for row_index in row_range {
                             if let Some(cmd) =
-                                show_row(ui, &rows[row_index], row_index, &mut row_context)
+                                show_row(ui, &rows[row_index], row_index, &layout, &mut row_context)
                             {
                                 command = Some(cmd);
                             }
@@ -183,28 +215,30 @@ pub fn show_empty(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut b
     frame.show(ui, |ui| {
         ui.set_min_height(content_height);
         ui.set_max_height(content_height);
-        let table_width = prefs
-            .columns
-            .iter()
-            .map(|pref| pref.width + RESIZE_W)
-            .sum::<f32>();
+        let layout = TableLayout::new(prefs, ui.available_width());
+        let table_width = layout.total_width;
 
         egui::ScrollArea::horizontal()
             .id_salt("file_table_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_min_width(table_width);
-                show_header(ui, prefs, prefs_changed);
+                show_header(ui, prefs, &layout, prefs_changed);
             });
     });
 }
 
-fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool) {
+fn show_header(
+    ui: &mut egui::Ui,
+    prefs: &mut AppPrefs,
+    layout: &TableLayout,
+    prefs_changed: &mut bool,
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for index in 0..prefs.columns.len() {
             let column = prefs.columns[index].column;
-            let width = prefs.columns[index].width;
+            let width = layout.width(index);
             let (rect, response) = ui.allocate_exact_size(vec2(width, HEADER_H), Sense::click());
             let fill = ui.visuals().widgets.inactive.bg_fill;
             ui.painter().rect_filled(rect, 0.0, fill);
@@ -278,6 +312,7 @@ fn show_row(
     ui: &mut egui::Ui,
     row: &RowInfo<'_>,
     row_index: usize,
+    layout: &TableLayout,
     context: &mut RowContext<'_>,
 ) -> Option<NodeCommand> {
     let mut command = None;
@@ -290,20 +325,16 @@ fn show_row(
         context.style.frame_fill
     };
 
-    let total_w = context
-        .prefs
-        .columns
-        .iter()
-        .map(|pref| pref.width + RESIZE_W)
-        .sum::<f32>();
+    let total_w = layout.total_width;
     let row_start = ui.cursor().min;
     let row_rect = Rect::from_min_size(row_start, vec2(total_w, ROW_H));
     ui.painter().rect_filled(row_rect, 0.0, bg);
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for pref in &context.prefs.columns {
-            let (rect, resp) = ui.allocate_exact_size(vec2(pref.width, ROW_H), Sense::click());
+        for (index, pref) in context.prefs.columns.iter().enumerate() {
+            let (rect, resp) =
+                ui.allocate_exact_size(vec2(layout.width(index), ROW_H), Sense::click());
             let cell_resp = resp;
             if cell_resp.hovered() {
                 context.pane.hovered = Some(row.id);
@@ -781,5 +812,26 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(middle_truncate_chars(&chars, 12), "very...n.tar.gz");
+    }
+
+    #[test]
+    fn name_column_absorbs_extra_table_width() {
+        let prefs = AppPrefs::default();
+        let base_width = prefs
+            .columns
+            .iter()
+            .map(|pref| pref.width + RESIZE_W)
+            .sum::<f32>();
+
+        let layout = TableLayout::new(&prefs, base_width + 120.0);
+
+        assert_eq!(layout.total_width, base_width + 120.0);
+        for (index, pref) in prefs.columns.iter().enumerate() {
+            if pref.column == TableColumn::Name {
+                assert_eq!(layout.width(index), pref.width + 120.0);
+            } else {
+                assert_eq!(layout.width(index), pref.width);
+            }
+        }
     }
 }
