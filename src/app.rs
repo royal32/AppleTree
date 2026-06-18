@@ -1785,16 +1785,7 @@ fn show_scope_panel(
             .show(ui, |ui| {
                 ui.set_min_height(list_h);
                 for item in &mut scope.items {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut item.checked, "");
-                        let label = if item.custom {
-                            egui::RichText::new(&item.label).strong()
-                        } else {
-                            egui::RichText::new(&item.label)
-                        };
-                        ui.add(egui::Label::new(label).sense(egui::Sense::hover()))
-                            .on_hover_text(item.path.display().to_string());
-                    });
+                    show_scope_item_row(ui, item);
                 }
             });
     });
@@ -1843,6 +1834,70 @@ fn show_scope_panel(
     });
 
     scan_request
+}
+
+fn show_scope_item_row(ui: &mut egui::Ui, item: &mut ScopeItem) {
+    let row_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
+    let response = response.on_hover_text(item.path.display().to_string());
+
+    if response.clicked() {
+        item.checked = !item.checked;
+    }
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+
+    let checkbox_size = 14.0;
+    let checkbox_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 7.0, rect.center().y),
+        egui::vec2(checkbox_size, checkbox_size),
+    );
+    let checkbox_visuals = if response.hovered() {
+        ui.visuals().widgets.hovered
+    } else {
+        ui.visuals().widgets.inactive
+    };
+    ui.painter().rect(
+        checkbox_rect,
+        2.0,
+        checkbox_visuals.bg_fill,
+        checkbox_visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    if item.checked {
+        let stroke = egui::Stroke::new(1.75, ui.visuals().selection.stroke.color);
+        ui.painter().line_segment(
+            [
+                egui::pos2(checkbox_rect.left() + 3.0, checkbox_rect.center().y),
+                egui::pos2(checkbox_rect.center().x - 1.0, checkbox_rect.bottom() - 3.0),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(checkbox_rect.center().x - 1.0, checkbox_rect.bottom() - 3.0),
+                egui::pos2(checkbox_rect.right() - 3.0, checkbox_rect.top() + 3.0),
+            ],
+            stroke,
+        );
+    }
+
+    let text = if item.custom {
+        egui::RichText::new(&item.label).strong()
+    } else {
+        egui::RichText::new(&item.label)
+    };
+    let text_pos = egui::pos2(checkbox_rect.right() + 6.0, rect.center().y);
+    ui.painter().text(
+        text_pos,
+        egui::Align2::LEFT_CENTER,
+        text.text(),
+        egui::FontId::proportional(13.0),
+        ui.visuals().text_color(),
+    );
 }
 
 fn scope_button_size(ui: &egui::Ui, text: &str) -> egui::Vec2 {
