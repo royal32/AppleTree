@@ -442,9 +442,10 @@ impl eframe::App for App {
                 let mut scan_paths = None;
                 show_empty_panes(
                     ctx,
+                    &mut self.prefs,
+                    &mut self.prefs_changed,
                     &mut self.scope,
                     &scope_logo,
-                    self.prefs.split_orientation,
                     &mut scan_paths,
                     true,
                 );
@@ -472,9 +473,10 @@ impl eframe::App for App {
                     let mut scan_paths = None;
                     show_empty_panes(
                         ctx,
+                        &mut self.prefs,
+                        &mut self.prefs_changed,
                         &mut self.scope,
                         &scope_logo,
-                        self.prefs.split_orientation,
                         &mut scan_paths,
                         false,
                     );
@@ -1485,15 +1487,19 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
 /// Render the three-pane layout with empty panels (same IDs as Loaded state).
 fn show_empty_panes(
     ctx: &egui::Context,
+    prefs: &mut AppPrefs,
+    prefs_changed: &mut bool,
     scope: &mut ScanScopeState,
     scope_logo: &egui::TextureHandle,
-    orientation: SplitOrientation,
     scan_request: &mut Option<Vec<PathBuf>>,
     enabled: bool,
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |_ui| {});
 
-    let mut show_table = |_ui: &mut egui::Ui| {};
+    let orientation = prefs.split_orientation;
+    let mut show_table = |ui: &mut egui::Ui| {
+        ui::tree_view::show_empty(ui, prefs, prefs_changed);
+    };
     let mut show_scope = |ui: &mut egui::Ui| {
         show_scope_logo(ui, scope_logo);
         if let Some(paths) = show_scope_panel(ui, scope, enabled) {
@@ -1518,7 +1524,9 @@ fn show_empty_panes(
                     show_table_scope_column(ui, &mut show_table, &mut show_scope);
                 });
 
-            egui::CentralPanel::default().show(ctx, |_ui| {});
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui::treemap_view::show_empty(ui);
+            });
         }
         SplitOrientation::TopBottom => {
             egui::TopBottomPanel::top("file_table_top")
@@ -1536,7 +1544,9 @@ fn show_empty_panes(
                     show_table_scope_row(ui, &mut show_table, &mut show_scope);
                 });
 
-            egui::CentralPanel::default().show(ctx, |_ui| {});
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui::treemap_view::show_empty(ui);
+            });
         }
     }
 }

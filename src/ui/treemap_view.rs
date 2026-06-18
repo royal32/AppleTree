@@ -348,6 +348,18 @@ pub fn show(
     command
 }
 
+pub fn show_empty(ui: &mut egui::Ui) {
+    let available = ui.available_size();
+    let (rect, _) = ui.allocate_exact_size(available, Sense::hover());
+    if rect.width() < 2.0 || rect.height() < 2.0 {
+        return;
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(40, 40, 40));
+    painter.rect_filled(rect.shrink(1.0), 0.0, Color32::from_rgb(28, 28, 28));
+}
+
 pub(crate) fn benchmark_render(
     tree: &FileTree,
     color_map: &ColorMap,

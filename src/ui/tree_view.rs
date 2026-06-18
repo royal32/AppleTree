@@ -166,6 +166,38 @@ pub fn show(
     command
 }
 
+pub fn show_empty(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool) {
+    let frame_fill = if ui.visuals().dark_mode {
+        Color32::from_rgb(38, 38, 38)
+    } else {
+        Color32::from_rgb(236, 236, 236)
+    };
+
+    let frame = egui::Frame::new()
+        .fill(frame_fill)
+        .corner_radius(8.0)
+        .inner_margin(4.0);
+    let frame_height = ui.available_height();
+    let content_height = (frame_height - frame.total_margin().sum().y).max(0.0);
+    frame.show(ui, |ui| {
+        ui.set_min_height(content_height);
+        ui.set_max_height(content_height);
+        let table_width = prefs
+            .columns
+            .iter()
+            .map(|pref| pref.width + RESIZE_W)
+            .sum::<f32>();
+
+        egui::ScrollArea::horizontal()
+            .id_salt("file_table_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_width(table_width);
+                show_header(ui, prefs, prefs_changed);
+            });
+    });
+}
+
 fn show_header(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
