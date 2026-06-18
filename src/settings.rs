@@ -24,6 +24,29 @@ impl SplitOrientation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilenameTruncation {
+    Middle,
+    End,
+}
+
+impl FilenameTruncation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Middle => "middle",
+            Self::End => "end",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "middle" => Some(Self::Middle),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableColumn {
     Name,
     Size,
@@ -110,6 +133,7 @@ pub struct AppPrefs {
     pub top_bottom_table_height: f32,
     pub treemap_folder_depth: usize,
     pub treemap_label_depth: usize,
+    pub filename_truncation: FilenameTruncation,
 }
 
 impl Default for AppPrefs {
@@ -128,6 +152,7 @@ impl Default for AppPrefs {
             top_bottom_table_height: 320.0,
             treemap_folder_depth: 2,
             treemap_label_depth: 1,
+            filename_truncation: FilenameTruncation::Middle,
         }
     }
 }
@@ -181,6 +206,11 @@ impl AppPrefs {
                         prefs.treemap_label_depth = depth;
                     }
                 }
+                "filename_truncation" => {
+                    if let Some(truncation) = FilenameTruncation::parse(value.trim()) {
+                        prefs.filename_truncation = truncation;
+                    }
+                }
                 _ => {}
             }
         }
@@ -207,7 +237,7 @@ impl AppPrefs {
             .join(",");
         let direction = if self.sort_descending { "desc" } else { "asc" };
         let text = format!(
-            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\n",
+            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\nfilename_truncation={}\n",
             self.split_orientation.as_str(),
             self.sort_column.id(),
             direction,
@@ -215,6 +245,7 @@ impl AppPrefs {
             self.top_bottom_table_height,
             self.treemap_folder_depth,
             self.treemap_label_depth,
+            self.filename_truncation.as_str(),
         );
         if let Err(e) = std::fs::write(&path, text) {
             eprintln!("Failed to save settings {:?}: {}", path, e);

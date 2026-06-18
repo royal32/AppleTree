@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use egui::{Color32, Id, Rect, Sense, Stroke, pos2, vec2};
 
 use crate::model::tree::{FileNode, FileTree, NodeId};
-use crate::settings::{AppPrefs, TableColumn};
+use crate::settings::{AppPrefs, FilenameTruncation, TableColumn};
 use crate::ui::file_icons::{self, FileIconCache};
 use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
 use crate::{format_count, format_modified, format_size};
@@ -432,12 +432,13 @@ fn paint_cell(
                 file_icons::paint_fallback_file_icon(ui.painter(), icon_rect);
             }
             x = icon_rect.right() + 5.0;
-            paint_middle_truncated_text(
+            paint_truncated_text(
                 ui,
                 Rect::from_min_max(pos2(x, rect.top()), rect.right_bottom()),
                 pos2(x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 row.display_name,
+                context.prefs.filename_truncation,
                 TextStyle {
                     font_id: egui::FontId::proportional(13.0),
                     color: text_color,
@@ -503,17 +504,21 @@ fn paint_cell(
     }
 }
 
-fn paint_middle_truncated_text(
+fn paint_truncated_text(
     ui: &egui::Ui,
     cell_rect: Rect,
     pos: egui::Pos2,
     align: egui::Align2,
     text: &str,
+    truncation: FilenameTruncation,
     style: TextStyle,
     strike: bool,
 ) {
     let max_width = (cell_rect.right() - pos.x - 4.0).max(0.0);
-    let display_text = middle_truncate_to_width(ui, text, &style, max_width);
+    let display_text = match truncation {
+        FilenameTruncation::Middle => middle_truncate_to_width(ui, text, &style, max_width),
+        FilenameTruncation::End => end_truncate_to_width(ui, text, &style, max_width),
+    };
     paint_text(ui, cell_rect, pos, align, &display_text, style, strike);
 }
 
@@ -554,6 +559,38 @@ fn middle_truncate_to_width(
     best
 }
 
+fn end_truncate_to_width(ui: &egui::Ui, text: &str, style: &TextStyle, max_width: f32) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if text_width(ui, text, style) <= max_width {
+        return text.to_owned();
+    }
+
+    const MARKER: &str = "...";
+    if text_width(ui, MARKER, style) > max_width {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut best = MARKER.to_owned();
+    let mut low = 0usize;
+    let mut high = chars.len().saturating_sub(1);
+    while low <= high {
+        let visible = (low + high) / 2;
+        let candidate = end_truncate_chars(&chars, visible);
+        if text_width(ui, &candidate, style) <= max_width {
+            best = candidate;
+            low = visible + 1;
+        } else if visible == 0 {
+            break;
+        } else {
+            high = visible - 1;
+        }
+    }
+    best
+}
+
 fn middle_truncate_chars(chars: &[char], visible: usize) -> String {
     if visible == 0 {
         return "...".to_owned();
@@ -568,6 +605,17 @@ fn middle_truncate_chars(chars: &[char], visible: usize) -> String {
     truncated.extend(chars.iter().take(prefix_len));
     truncated.push_str("...");
     truncated.extend(chars.iter().skip(chars.len() - suffix_len));
+    truncated
+}
+
+fn end_truncate_chars(chars: &[char], visible: usize) -> String {
+    if visible == 0 {
+        return "...".to_owned();
+    }
+
+    let mut truncated = String::with_capacity(visible + 3);
+    truncated.extend(chars.iter().take(visible.min(chars.len())));
+    truncated.push_str("...");
     truncated
 }
 
@@ -812,6 +860,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(middle_truncate_chars(&chars, 12), "very...n.tar.gz");
+    }
+
+    #[test]
+    fn end_truncation_keeps_prefix() {
+        let chars = "very-long-filename-with-important-extension.tar.gz"
+            .chars()
+            .collect::<Vec<_>>();
+
+        assert_eq!(end_truncate_chars(&chars, 12), "very-long-fi...");
     }
 
     #[test]

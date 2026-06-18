@@ -12,7 +12,7 @@ use eframe::egui;
 
 use crate::model::color::ColorMap;
 use crate::model::tree::{FileTree, NodeId};
-use crate::settings::{AppPrefs, SplitOrientation};
+use crate::settings::{AppPrefs, FilenameTruncation, SplitOrientation};
 use crate::ui::file_icons::FileIconCache;
 use crate::ui::{self, NodeCommand};
 use crate::{format_compact_count, format_size};
@@ -648,6 +648,9 @@ impl LoadedState {
                     if split_layout_toggle(ui, &mut prefs.split_orientation) {
                         *prefs_changed = true;
                     }
+                    if filename_truncation_toggle(ui, &mut prefs.filename_truncation) {
+                        *prefs_changed = true;
+                    }
 
                     ui.separator();
                     if let Some(label_depth) = icon_depth_slider(
@@ -868,6 +871,7 @@ impl LoadedState {
 enum StatusIcon {
     FileLabels,
     FolderLabels,
+    FilenameTruncation,
     SplitLayout,
 }
 
@@ -887,6 +891,28 @@ fn split_layout_toggle(ui: &mut egui::Ui, orientation: &mut SplitOrientation) ->
         *orientation = match orientation {
             SplitOrientation::LeftRight => SplitOrientation::TopBottom,
             SplitOrientation::TopBottom => SplitOrientation::LeftRight,
+        };
+    }
+    clicked
+}
+
+fn filename_truncation_toggle(ui: &mut egui::Ui, truncation: &mut FilenameTruncation) -> bool {
+    let flip_y = match truncation {
+        FilenameTruncation::Middle => false,
+        FilenameTruncation::End => true,
+    };
+    let response =
+        status_icon_button_transformed(ui, StatusIcon::FilenameTruncation, 0, flip_y, true);
+    let tooltip = match truncation {
+        FilenameTruncation::Middle => "Switch to end truncation",
+        FilenameTruncation::End => "Switch to middle truncation",
+    };
+    show_immediate_tooltip(&response, tooltip);
+    let clicked = response.clicked();
+    if clicked {
+        *truncation = match truncation {
+            FilenameTruncation::Middle => FilenameTruncation::End,
+            FilenameTruncation::End => FilenameTruncation::Middle,
         };
     }
     clicked
@@ -1020,6 +1046,16 @@ fn status_icon_button(
     quarter_turns: u8,
     active: bool,
 ) -> egui::Response {
+    status_icon_button_transformed(ui, icon, quarter_turns, false, active)
+}
+
+fn status_icon_button_transformed(
+    ui: &mut egui::Ui,
+    icon: StatusIcon,
+    quarter_turns: u8,
+    flip_y: bool,
+    active: bool,
+) -> egui::Response {
     let size = egui::vec2(28.0, 24.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let visuals = ui.style().interact(&response);
@@ -1040,6 +1076,9 @@ fn status_icon_button(
     match icon {
         StatusIcon::FileLabels => paint_file_label_icon(painter, icon_rect, stroke),
         StatusIcon::FolderLabels => paint_folder_label_icon(painter, icon_rect, stroke),
+        StatusIcon::FilenameTruncation => {
+            paint_filename_truncation_icon(painter, icon_rect, stroke, flip_y)
+        }
         StatusIcon::SplitLayout => {
             paint_split_layout_icon(painter, icon_rect, stroke, quarter_turns)
         }
@@ -1055,6 +1094,17 @@ fn status_icon_button(
 }
 
 fn icon_pos(rect: egui::Rect, x: f32, y: f32, quarter_turns: u8) -> egui::Pos2 {
+    icon_pos_transformed(rect, x, y, quarter_turns, false)
+}
+
+fn icon_pos_transformed(
+    rect: egui::Rect,
+    x: f32,
+    y: f32,
+    quarter_turns: u8,
+    flip_y: bool,
+) -> egui::Pos2 {
+    let y = if flip_y { 24.0 - y } else { y };
     let (x, y) = match quarter_turns % 4 {
         1 => (24.0 - y, x),
         2 => (24.0 - x, 24.0 - y),
@@ -1077,6 +1127,22 @@ fn paint_polyline(
         points
             .iter()
             .map(|&(x, y)| icon_pos(rect, x, y, 0))
+            .collect::<Vec<_>>(),
+        stroke,
+    );
+}
+
+fn paint_svg_polyline(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    flip_y: bool,
+    points: &[(f32, f32)],
+) {
+    painter.line(
+        points
+            .iter()
+            .map(|&(x, y)| icon_pos_transformed(rect, x, y, 0, flip_y))
             .collect::<Vec<_>>(),
         stroke,
     );
@@ -1130,6 +1196,60 @@ fn paint_file_label_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui
         &[(4.5, 3.75), (4.5, 20.25), (11.5, 20.25)],
     );
     paint_eye_icon(painter, rect, stroke);
+}
+
+fn paint_filename_truncation_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    flip_y: bool,
+) {
+    // Geometry mirrors src/ui/assets/filename-truncation.svg.
+    paint_svg_polyline(painter, rect, stroke, flip_y, &[(4.25, 7.25), (7.5, 7.25)]);
+    for x in [10.15, 12.0, 13.85] {
+        painter.circle_filled(
+            icon_pos_transformed(rect, x, 7.25, 0, flip_y),
+            rect.width() * 0.45 / 24.0,
+            stroke.color,
+        );
+    }
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        flip_y,
+        &[(16.5, 7.25), (19.75, 7.25)],
+    );
+
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        flip_y,
+        &[(4.25, 16.75), (13.25, 16.75)],
+    );
+    for x in [16.15, 18.0, 19.85] {
+        painter.circle_filled(
+            icon_pos_transformed(rect, x, 16.75, 0, flip_y),
+            rect.width() * 0.45 / 24.0,
+            stroke.color,
+        );
+    }
+
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        flip_y,
+        &[(8.25, 11.95), (15.75, 11.95)],
+    );
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        flip_y,
+        &[(13.25, 9.7), (15.75, 11.95), (13.25, 14.2)],
+    );
 }
 
 fn paint_folder_label_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
@@ -1632,6 +1752,9 @@ fn show_empty_status_bar(
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if split_layout_toggle(ui, &mut prefs.split_orientation) {
+                    *prefs_changed = true;
+                }
+                if filename_truncation_toggle(ui, &mut prefs.filename_truncation) {
                     *prefs_changed = true;
                 }
 
