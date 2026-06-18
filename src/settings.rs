@@ -50,17 +50,17 @@ impl FilenameTruncation {
 pub enum TreemapPalette {
     Classic,
     Pastel,
-    DesaturatedRedFrames,
+    DesaturatedBoldFrames,
 }
 
 impl TreemapPalette {
-    pub const ALL: [Self; 3] = [Self::Classic, Self::Pastel, Self::DesaturatedRedFrames];
+    pub const ALL: [Self; 3] = [Self::Classic, Self::Pastel, Self::DesaturatedBoldFrames];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Classic => "Classic",
             Self::Pastel => "Pastel",
-            Self::DesaturatedRedFrames => "Desaturated\n(Directory Focused)",
+            Self::DesaturatedBoldFrames => "Desaturated\n(Directory Focused)",
         }
     }
 
@@ -68,7 +68,7 @@ impl TreemapPalette {
         match self {
             Self::Classic => "classic",
             Self::Pastel => "pastel",
-            Self::DesaturatedRedFrames => "desaturated_red_frames",
+            Self::DesaturatedBoldFrames => "desaturated_red_frames",
         }
     }
 
@@ -76,7 +76,7 @@ impl TreemapPalette {
         match value {
             "classic" => Some(Self::Classic),
             "pastel" => Some(Self::Pastel),
-            "desaturated_red_frames" => Some(Self::DesaturatedRedFrames),
+            "desaturated_red_frames" => Some(Self::DesaturatedBoldFrames),
             _ => None,
         }
     }

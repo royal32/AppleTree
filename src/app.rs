@@ -1023,7 +1023,7 @@ fn palette_tile(ui: &mut egui::Ui, palette: TreemapPalette, selected: bool) -> e
         );
         painter.rect_filled(stripe, 0.0, colors[i]);
     }
-    if palette == TreemapPalette::DesaturatedRedFrames {
+    if palette == TreemapPalette::DesaturatedBoldFrames {
         painter.rect_stroke(
             swatch_rect,
             0.0,

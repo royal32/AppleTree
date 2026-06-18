@@ -198,7 +198,7 @@ pub fn palette_colors(palette: TreemapPalette) -> &'static [Color32; 18] {
     match palette {
         TreemapPalette::Classic => &PALETTE_TREEMAP,
         TreemapPalette::Pastel => &PASTEL_PALETTE,
-        TreemapPalette::DesaturatedRedFrames => &DESATURATED_PALETTE,
+        TreemapPalette::DesaturatedBoldFrames => &DESATURATED_PALETTE,
     }
 }
 
@@ -210,27 +210,27 @@ pub fn palette_color(palette: TreemapPalette, index: usize) -> Color32 {
 pub fn folder_frame_color(palette: TreemapPalette) -> Color32 {
     match palette {
         TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(76, 76, 76),
-        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(255, 38, 52),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(255, 38, 244),
     }
 }
 
 pub fn folder_shell_color(palette: TreemapPalette) -> Color32 {
     match palette {
         TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(40, 40, 40),
-        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(82, 24, 28),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(82, 24, 28),
     }
 }
 
 pub fn folder_header_color(palette: TreemapPalette) -> Color32 {
     match palette {
         TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(50, 50, 50),
-        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(122, 26, 34),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(122, 26, 108),
     }
 }
 
 pub fn folder_content_color(palette: TreemapPalette) -> Color32 {
     match palette {
         TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(28, 28, 28),
-        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(30, 26, 26),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(30, 26, 26),
     }
 }
