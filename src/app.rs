@@ -881,7 +881,8 @@ fn split_layout_toggle(ui: &mut egui::Ui, orientation: &mut SplitOrientation) ->
         SplitOrientation::LeftRight => "Switch to top/bottom layout",
         SplitOrientation::TopBottom => "Switch to left/right layout",
     };
-    let clicked = response.on_hover_text(tooltip).clicked();
+    show_immediate_tooltip(&response, tooltip);
+    let clicked = response.clicked();
     if clicked {
         *orientation = match orientation {
             SplitOrientation::LeftRight => SplitOrientation::TopBottom,
@@ -923,9 +924,8 @@ fn icon_depth_slider(
             .fixed_pos(popup_pos)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(46.0, 150.0));
+                    ui.set_min_size(egui::vec2(46.0, 120.0));
                     ui.vertical_centered(|ui| {
-                        ui.small(label);
                         ui.label(value.to_string());
                         let slider_response = ui.add(
                             egui::Slider::new(&mut value, range_start..=range_end)
@@ -941,12 +941,44 @@ fn icon_depth_slider(
             });
         ui.ctx()
             .data_mut(|data| data.insert_temp(popup_id, inner.response.rect));
+        if response.hovered() || popup_hovered {
+            show_immediate_tooltip_above(
+                ui.ctx(),
+                response.id.with("tooltip"),
+                inner.response.rect,
+                label,
+            );
+        }
     } else {
         ui.ctx()
             .data_mut(|data| data.remove::<egui::Rect>(popup_id));
     }
 
     next_value
+}
+
+fn show_immediate_tooltip(response: &egui::Response, text: &'static str) {
+    if response.hovered() {
+        response.show_tooltip_text(text);
+    }
+}
+
+fn show_immediate_tooltip_above(
+    ctx: &egui::Context,
+    id: egui::Id,
+    anchor_rect: egui::Rect,
+    text: &'static str,
+) {
+    let pos = anchor_rect.left_top() + egui::vec2(0.0, -6.0);
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(text);
+            });
+        });
 }
 
 fn paint_slider_notches(
