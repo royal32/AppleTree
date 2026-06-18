@@ -28,9 +28,7 @@ pub struct App {
 }
 
 enum AppState {
-    WaitingForPicker {
-        frames: u8,
-    },
+    Empty,
     Scanning {
         paths: Vec<PathBuf>,
         start_time: Instant,
@@ -279,7 +277,7 @@ impl App {
 
         let initial_path_buf = initial_path.as_ref().map(PathBuf::from);
         let mut app = Self {
-            state: AppState::WaitingForPicker { frames: 2 },
+            state: AppState::Empty,
             prefs: AppPrefs::load(),
             scope: ScanScopeState::new(initial_path_buf.as_deref()),
             scope_logo: load_scope_logo_texture(&cc.egui_ctx),
@@ -305,10 +303,7 @@ impl App {
             return;
         }
 
-        let previous = match std::mem::replace(
-            &mut self.state,
-            AppState::WaitingForPicker { frames: u8::MAX },
-        ) {
+        let previous = match std::mem::replace(&mut self.state, AppState::Empty) {
             AppState::Loaded(loaded) => Some(loaded),
             AppState::Scanning { previous, .. } => previous,
             _ => None,
@@ -443,7 +438,7 @@ impl eframe::App for App {
         let mut immediate_scan_paths: Option<Vec<PathBuf>> = None;
         let scope_logo = self.scope_logo.clone();
         match &mut self.state {
-            AppState::WaitingForPicker { frames } => {
+            AppState::Empty => {
                 let mut scan_paths = None;
                 show_empty_panes(
                     ctx,
@@ -454,23 +449,8 @@ impl eframe::App for App {
                     true,
                 );
                 if let Some(paths) = scan_paths {
-                    *frames = u8::MAX;
                     immediate_scan_paths = Some(paths);
-                } else if *frames > 0 {
-                    *frames -= 1;
-                    ctx.request_repaint();
-                } else if *frames == 0 {
-                    // Prevent re-entry after the blocking dialog returns
-                    *frames = u8::MAX;
-                    let result = pick_folder_at_home();
-                    if let Some(path) = result {
-                        self.scope.add_custom_checked(&path);
-                        immediate_scan_paths = Some(vec![path]);
-                    } else {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
                 }
-                // frames == u8::MAX: dialog was dismissed, waiting for close
             }
             AppState::Scanning {
                 paths,
@@ -533,22 +513,31 @@ impl eframe::App for App {
 
         // Handle ⌘O and pending scans requested by in-panel controls outside
         // the match to avoid borrow conflicts with self.state.
-        if let AppState::Loaded(loaded) = &mut self.state {
-            let cmd_o = ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.command);
-            let paths = if cmd_o {
-                pick_folder().map(|path| {
+        let cmd_o = ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.command);
+        match &mut self.state {
+            AppState::Empty => {
+                if cmd_o && let Some(path) = pick_folder() {
                     self.scope.add_custom_checked(&path);
-                    vec![path]
-                })
-            } else {
-                loaded.pending_scan.take()
-            };
-            if let Some(paths) = paths {
-                for path in &paths {
-                    self.scope.add_custom_checked(path);
+                    self.start_scan_paths(vec![path]);
                 }
-                self.start_scan_paths(paths);
             }
+            AppState::Loaded(loaded) => {
+                let paths = if cmd_o {
+                    pick_folder().map(|path| {
+                        self.scope.add_custom_checked(&path);
+                        vec![path]
+                    })
+                } else {
+                    loaded.pending_scan.take()
+                };
+                if let Some(paths) = paths {
+                    for path in &paths {
+                        self.scope.add_custom_checked(path);
+                    }
+                    self.start_scan_paths(paths);
+                }
+            }
+            AppState::Scanning { .. } | AppState::ScanFailed { .. } => {}
         }
 
         if self.prefs_changed {
@@ -1504,35 +1493,52 @@ fn show_empty_panes(
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |_ui| {});
 
-    egui::SidePanel::left("file_table")
-        .default_width(820.0)
-        .min_width(640.0)
-        .show_separator_line(false)
-        .frame(
-            egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
-        )
-        .show(ctx, |ui| {
-            if !enabled {
-                ui.disable();
-            }
-            let mut show_table = |_ui: &mut egui::Ui| {};
-            let mut show_scope = |ui: &mut egui::Ui| {
-                show_scope_logo(ui, scope_logo);
-                if let Some(paths) = show_scope_panel(ui, scope, enabled) {
-                    *scan_request = Some(paths);
-                }
-            };
-            match orientation {
-                SplitOrientation::LeftRight => {
-                    show_table_scope_column(ui, &mut show_table, &mut show_scope);
-                }
-                SplitOrientation::TopBottom => {
-                    show_table_scope_row(ui, &mut show_table, &mut show_scope);
-                }
-            }
-        });
+    let mut show_table = |_ui: &mut egui::Ui| {};
+    let mut show_scope = |ui: &mut egui::Ui| {
+        show_scope_logo(ui, scope_logo);
+        if let Some(paths) = show_scope_panel(ui, scope, enabled) {
+            *scan_request = Some(paths);
+        }
+    };
 
-    egui::CentralPanel::default().show(ctx, |_ui| {});
+    match orientation {
+        SplitOrientation::LeftRight => {
+            egui::SidePanel::left("file_table")
+                .default_width(820.0)
+                .min_width(640.0)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::side_top_panel(ctx.style().as_ref())
+                        .inner_margin(egui::Margin::from(8)),
+                )
+                .show(ctx, |ui| {
+                    if !enabled {
+                        ui.disable();
+                    }
+                    show_table_scope_column(ui, &mut show_table, &mut show_scope);
+                });
+
+            egui::CentralPanel::default().show(ctx, |_ui| {});
+        }
+        SplitOrientation::TopBottom => {
+            egui::TopBottomPanel::top("file_table_top")
+                .default_height(360.0)
+                .min_height(180.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::side_top_panel(ctx.style().as_ref())
+                        .inner_margin(egui::Margin::from(8)),
+                )
+                .show(ctx, |ui| {
+                    if !enabled {
+                        ui.disable();
+                    }
+                    show_table_scope_row(ui, &mut show_table, &mut show_scope);
+                });
+
+            egui::CentralPanel::default().show(ctx, |_ui| {});
+        }
+    }
 }
 
 fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Duration) {
@@ -1714,15 +1720,6 @@ github.com/MichaelStromberg/macdirstat
             nsstring("NSHumanReadableCopyright"),
         );
     }
-}
-
-/// Folder picker starting at $HOME — used on startup.
-fn pick_folder_at_home() -> Option<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
-    rfd::FileDialog::new()
-        .set_title("Select folder to scan")
-        .set_directory(&home)
-        .pick_folder()
 }
 
 /// Folder picker used by explicit rescan controls.
