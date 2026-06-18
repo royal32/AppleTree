@@ -1494,7 +1494,7 @@ fn show_empty_panes(
     scan_request: &mut Option<Vec<PathBuf>>,
     enabled: bool,
 ) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |_ui| {});
+    show_empty_status_bar(ctx, prefs, prefs_changed, enabled);
 
     let orientation = prefs.split_orientation;
     let mut show_table = |ui: &mut egui::Ui| {
@@ -1549,6 +1549,52 @@ fn show_empty_panes(
             });
         }
     }
+}
+
+fn show_empty_status_bar(
+    ctx: &egui::Context,
+    prefs: &mut AppPrefs,
+    prefs_changed: &mut bool,
+    enabled: bool,
+) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        if !enabled {
+            ui.disable();
+        }
+        ui.horizontal(|ui| {
+            ui.label("No scan");
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if split_layout_toggle(ui, &mut prefs.split_orientation) {
+                    *prefs_changed = true;
+                }
+
+                ui.separator();
+                if let Some(label_depth) = icon_depth_slider(
+                    ui,
+                    StatusIcon::FileLabels,
+                    prefs.treemap_label_depth,
+                    prefs.treemap_label_depth.max(1),
+                    0..=5,
+                    "File labels",
+                ) {
+                    prefs.treemap_label_depth = label_depth;
+                    *prefs_changed = true;
+                }
+                if let Some(folder_depth) = icon_depth_slider(
+                    ui,
+                    StatusIcon::FolderLabels,
+                    prefs.treemap_folder_depth,
+                    prefs.treemap_folder_depth.max(1),
+                    0..=6,
+                    "Folder boxes",
+                ) {
+                    prefs.treemap_folder_depth = folder_depth;
+                    *prefs_changed = true;
+                }
+            });
+        });
+    });
 }
 
 fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Duration) {
