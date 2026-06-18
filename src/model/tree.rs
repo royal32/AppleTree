@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use crate::scan::getattrlistbulk::{self, DirEntry};
@@ -125,19 +126,37 @@ impl FileTree {
 
     /// Build a file tree from one or more scan roots.
     pub fn scan_paths(roots: &[std::path::PathBuf]) -> Self {
+        Self::scan_paths_inner(roots, None).expect("scan without cancellation should complete")
+    }
+
+    /// Build a file tree from scan roots, returning None if cancelled.
+    pub fn scan_paths_cancelable(
+        roots: &[std::path::PathBuf],
+        cancel: &AtomicBool,
+    ) -> Option<Self> {
+        Self::scan_paths_inner(roots, Some(cancel))
+    }
+
+    fn scan_paths_inner(roots: &[std::path::PathBuf], cancel: Option<&AtomicBool>) -> Option<Self> {
         let mut root_node = if roots.len() == 1 {
-            build_root_node(&roots[0])
+            build_root_node(&roots[0], cancel)?
         } else {
-            build_virtual_root(roots)
+            build_virtual_root(roots, cancel)?
         };
+        if scan_cancelled(cancel) {
+            return None;
+        }
         let mut next_id = 1;
         assign_node_ids(&mut root_node, &mut next_id);
 
+        if scan_cancelled(cancel) {
+            return None;
+        }
         let mut extensions: Vec<(Box<str>, u64)> =
             extension_totals(&root_node).into_iter().collect();
         extensions.sort_unstable_by_key(|(_, size)| Reverse(*size));
 
-        FileTree {
+        Some(FileTree {
             root: root_node,
             root_path: if roots.len() == 1 {
                 roots
@@ -148,7 +167,7 @@ impl FileTree {
                 String::new()
             },
             extensions,
-        }
+        })
     }
 
     /// Build the full filesystem path for a node identified by index path.
@@ -213,7 +232,14 @@ fn assign_node_ids(node: &mut FileNode, next_id: &mut NodeId) {
     }
 }
 
-fn build_root_node(path: &Path) -> FileNode {
+fn scan_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+}
+
+fn build_root_node(path: &Path, cancel: Option<&AtomicBool>) -> Option<FileNode> {
+    if scan_cancelled(cancel) {
+        return None;
+    }
     let fd = getattrlistbulk::open_dir(path);
     if fd < 0 {
         eprintln!(
@@ -223,25 +249,34 @@ fn build_root_node(path: &Path) -> FileNode {
     }
     let name: Box<str> = root_display_name(path).into();
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    let mut node = build_node_fd(fd, name, modified);
+    let Some(mut node) = build_node_fd(fd, name, modified, cancel) else {
+        getattrlistbulk::close_dir(fd);
+        return None;
+    };
     node.source_path = Some(path.display().to_string().into());
     getattrlistbulk::close_dir(fd);
-    node
+    Some(node)
 }
 
-fn build_virtual_root(roots: &[std::path::PathBuf]) -> FileNode {
+fn build_virtual_root(
+    roots: &[std::path::PathBuf],
+    cancel: Option<&AtomicBool>,
+) -> Option<FileNode> {
     let mut children = roots
         .iter()
         .filter(|path| path.is_dir())
-        .map(|path| build_root_node(path))
-        .collect::<Vec<_>>();
+        .map(|path| build_root_node(path, cancel))
+        .collect::<Option<Vec<_>>>()?;
+    if scan_cancelled(cancel) {
+        return None;
+    }
     children.sort_unstable_by_key(|child| Reverse(child.size));
 
     let size = children.iter().map(|child| child.size).sum();
     let file_count = children.iter().map(|child| child.file_count).sum();
     let dir_count = 1 + children.iter().map(|child| child.dir_count).sum::<u64>();
 
-    FileNode {
+    Some(FileNode {
         id: 0,
         name: "Scan Scope".into(),
         source_path: None,
@@ -251,7 +286,7 @@ fn build_virtual_root(roots: &[std::path::PathBuf]) -> FileNode {
         modified: None,
         file_count,
         dir_count,
-    }
+    })
 }
 
 fn root_display_name(path: &Path) -> String {
@@ -289,15 +324,25 @@ fn build_node_fd(
     parent_fd: libc::c_int,
     node_name: Box<str>,
     modified: Option<SystemTime>,
-) -> FileNode {
+    cancel: Option<&AtomicBool>,
+) -> Option<FileNode> {
     use rayon::prelude::*;
+
+    if scan_cancelled(cancel) {
+        return None;
+    }
 
     let mut file_nodes: Vec<FileNode> = Vec::new();
     let mut dir_entries: Vec<DirEntry> = Vec::new();
     let mut total_size: u64 = 0;
     let mut total_file_count: u64 = 0;
+    let mut cancelled = false;
 
     getattrlistbulk::scan_dir_entries_fd(parent_fd, |entry| {
+        if scan_cancelled(cancel) {
+            cancelled = true;
+            return false;
+        }
         if entry.is_dir {
             dir_entries.push(entry);
         } else {
@@ -315,21 +360,39 @@ fn build_node_fd(
                 dir_count: 0,
             });
         }
+        true
     });
 
+    if cancelled || scan_cancelled(cancel) {
+        return None;
+    }
+
     // Recurse into subdirectories — use openat() relative to parent fd
-    let build_child = |entry: &DirEntry| -> FileNode {
+    let build_child = |entry: &DirEntry| -> Option<FileNode> {
+        if scan_cancelled(cancel) {
+            return None;
+        }
         let child_fd = getattrlistbulk::openat_dir(parent_fd, &entry.name);
-        let node = build_node_fd(child_fd, entry.name.clone(), entry.modified);
+        let node = build_node_fd(child_fd, entry.name.clone(), entry.modified, cancel);
         getattrlistbulk::close_dir(child_fd);
         node
     };
 
     let dir_nodes: Vec<FileNode> = if dir_entries.len() >= 2 {
-        dir_entries.par_iter().map(build_child).collect()
+        dir_entries
+            .par_iter()
+            .map(build_child)
+            .collect::<Option<Vec<_>>>()?
     } else {
-        dir_entries.iter().map(build_child).collect()
+        dir_entries
+            .iter()
+            .map(build_child)
+            .collect::<Option<Vec<_>>>()?
     };
+
+    if scan_cancelled(cancel) {
+        return None;
+    }
 
     let mut total_dir_count: u64 = 0;
     for child in &dir_nodes {
@@ -344,7 +407,7 @@ fn build_node_fd(
 
     children.sort_unstable_by_key(|child| Reverse(child.size));
 
-    FileNode {
+    Some(FileNode {
         id: 0,
         name: node_name,
         source_path: None,
@@ -354,7 +417,7 @@ fn build_node_fd(
         modified,
         file_count: total_file_count,
         dir_count: total_dir_count + 1,
-    }
+    })
 }
 
 #[cfg(test)]

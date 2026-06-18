@@ -93,7 +93,7 @@ pub(crate) fn close_dir(fd: libc::c_int) {
 /// Scan using an already-opened fd. Emits entries without closing the fd.
 pub(crate) fn scan_dir_entries_fd<F>(fd: libc::c_int, mut emit: F)
 where
-    F: FnMut(DirEntry),
+    F: FnMut(DirEntry) -> bool,
 {
     if fd < 0 {
         return;
@@ -123,7 +123,9 @@ where
                 break;
             }
 
-            parse_dir_entries(&buffer, count as usize, &mut emit);
+            if !parse_dir_entries(&buffer, count as usize, &mut emit) {
+                break;
+            }
         }
     }); // end SCAN_BUFFER.with
 }
@@ -161,9 +163,9 @@ fn read_i64(buf: &[u8], offset: usize) -> i64 {
 }
 
 /// Parse buffer entries into DirEntry directly.
-fn parse_dir_entries<F>(buffer: &[u8], count: usize, emit: &mut F)
+fn parse_dir_entries<F>(buffer: &[u8], count: usize, emit: &mut F) -> bool
 where
-    F: FnMut(DirEntry),
+    F: FnMut(DirEntry) -> bool,
 {
     let buf_size = buffer.len();
     let mut offset = 0usize;
@@ -247,12 +249,15 @@ where
             let _ = value_pos;
         }
 
-        emit(DirEntry {
+        if !emit(DirEntry {
             name,
             is_dir: obj_type == VDIR,
             disk_size: disk_size.unwrap_or(total_size),
             modified,
-        });
+        }) {
+            return false;
+        }
         offset += entry_length;
     }
+    true
 }

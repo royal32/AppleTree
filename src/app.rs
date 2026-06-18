@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -34,6 +36,7 @@ enum AppState {
         start_time: Instant,
         receiver: Receiver<ScanResult>,
         worker: Option<JoinHandle<()>>,
+        cancel: Arc<AtomicBool>,
         previous: Option<Box<LoadedState>>,
     },
     ScanFailed {
@@ -336,32 +339,42 @@ impl App {
 
         let previous = match std::mem::replace(&mut self.state, AppState::Empty) {
             AppState::Loaded(loaded) => Some(loaded),
-            AppState::Scanning { previous, .. } => previous,
+            AppState::Scanning {
+                previous, cancel, ..
+            } => {
+                cancel.store(true, Ordering::Relaxed);
+                previous
+            }
             _ => None,
         };
 
         let start_time = Instant::now();
         let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
         let worker_paths = paths.clone();
         let worker_sender = sender.clone();
+        let worker_cancel = Arc::clone(&cancel);
         let worker = match std::thread::Builder::new()
             .name("appletree-scan".to_owned())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let tree = FileTree::scan_paths(&worker_paths);
+                    let Some(tree) = FileTree::scan_paths_cancelable(&worker_paths, &worker_cancel)
+                    else {
+                        return Err("Scan cancelled".to_owned());
+                    };
                     let color_map = ColorMap::from_extensions(&tree.extensions);
-                    ScanCompletion {
+                    Ok(ScanCompletion {
                         tree,
                         color_map,
                         scan_paths: worker_paths.clone(),
                         scan_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
-                    }
+                    })
                 }))
-                .map_err(|_| {
-                    format!(
+                .unwrap_or_else(|_| {
+                    Err(format!(
                         "Scan failed unexpectedly for {}",
                         scan_scope_display(&worker_paths)
-                    )
+                    ))
                 });
                 let _ = worker_sender.send(result);
             }) {
@@ -377,8 +390,28 @@ impl App {
             start_time,
             receiver,
             worker,
+            cancel,
             previous,
         };
+    }
+
+    fn cancel_scan(&mut self) {
+        let previous = match &mut self.state {
+            AppState::Scanning {
+                cancel, previous, ..
+            } => {
+                cancel.store(true, Ordering::Relaxed);
+                previous.take()
+            }
+            _ => return,
+        };
+
+        if let Some(mut loaded) = previous {
+            loaded.status_message = Some("Scan cancelled".to_owned());
+            self.state = AppState::Loaded(loaded);
+        } else {
+            self.state = AppState::Empty;
+        }
     }
 
     fn poll_scan(&mut self) {
@@ -468,6 +501,7 @@ impl eframe::App for App {
         self.poll_scan();
 
         let mut immediate_scan_paths: Option<Vec<PathBuf>> = None;
+        let mut cancel_scan_requested = false;
         let scope_logo = self.scope_logo.clone();
         match &mut self.state {
             AppState::Empty => {
@@ -513,7 +547,7 @@ impl eframe::App for App {
                         false,
                     );
                 }
-                show_scanning_overlay(ctx, paths, start_time.elapsed());
+                cancel_scan_requested = show_scanning_overlay(ctx, paths, start_time.elapsed());
             }
             AppState::ScanFailed { paths, message } => {
                 let mut retry_paths = None;
@@ -539,6 +573,10 @@ impl eframe::App for App {
                 }
                 loaded.memory_relief.run(ctx);
             }
+        }
+
+        if cancel_scan_requested {
+            self.cancel_scan();
         }
 
         if let Some(paths) = immediate_scan_paths {
@@ -2211,8 +2249,9 @@ fn show_empty_status_bar(
     });
 }
 
-fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Duration) {
+fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Duration) -> bool {
     let screen_rect = ctx.screen_rect();
+    let mut cancel_requested = false;
 
     egui::Area::new(egui::Id::new("scan_overlay_blocker"))
         .order(egui::Order::Middle)
@@ -2246,9 +2285,14 @@ fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Durati
                     ui.add_space(6.0);
                     ui.label(scan_scope_display(paths));
                     ui.label(format!("{:.1}s elapsed", elapsed.as_secs_f64()));
+                    ui.add_space(12.0);
+                    if ui.button("Cancel").clicked() {
+                        cancel_requested = true;
+                    }
                 });
         });
     ctx.request_repaint_after(Duration::from_millis(100));
+    cancel_requested
 }
 
 fn show_scan_failed(
