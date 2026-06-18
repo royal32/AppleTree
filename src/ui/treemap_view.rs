@@ -874,7 +874,7 @@ fn truncate_text_to_width(
         return text.to_owned();
     }
 
-    const MARKER: &str = "...";
+    const MARKER: &str = "…";
     if text_width(painter, MARKER, font_id, color) > max_width {
         return String::new();
     }
@@ -903,7 +903,7 @@ fn truncate_text_to_width(
 
 fn middle_truncate_chars(chars: &[char], visible: usize) -> String {
     if visible == 0 {
-        return "...".to_owned();
+        return "…".to_owned();
     }
 
     let suffix_len = ((visible * 2) / 3).max(1).min(chars.len());
@@ -913,19 +913,19 @@ fn middle_truncate_chars(chars: &[char], visible: usize) -> String {
 
     let mut truncated = String::with_capacity(visible + 3);
     truncated.extend(chars.iter().take(prefix_len));
-    truncated.push_str("...");
+    truncated.push_str("…");
     truncated.extend(chars.iter().skip(chars.len() - suffix_len));
     truncated
 }
 
 fn end_truncate_chars(chars: &[char], visible: usize) -> String {
     if visible == 0 {
-        return "...".to_owned();
+        return "…".to_owned();
     }
 
     let mut truncated = String::with_capacity(visible + 3);
     truncated.extend(chars.iter().take(visible.min(chars.len())));
-    truncated.push_str("...");
+    truncated.push_str("…");
     truncated
 }
 

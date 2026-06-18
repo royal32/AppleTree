@@ -1174,7 +1174,7 @@ fn middle_truncate_status_text(
         return text.to_owned();
     }
 
-    const MARKER: &str = "...";
+    const MARKER: &str = "…";
     if status_text_width(ui, MARKER, font_id, color) > max_width {
         return String::new();
     }
@@ -1200,7 +1200,7 @@ fn middle_truncate_status_text(
 
 fn middle_truncate_status_chars(chars: &[char], visible: usize) -> String {
     if visible == 0 {
-        return "...".to_owned();
+        return "…".to_owned();
     }
 
     let suffix_len = ((visible * 2) / 3).max(1).min(chars.len());
@@ -1210,7 +1210,7 @@ fn middle_truncate_status_chars(chars: &[char], visible: usize) -> String {
 
     let mut truncated = String::with_capacity(visible + 3);
     truncated.extend(chars.iter().take(prefix_len));
-    truncated.push_str("...");
+    truncated.push_str("…");
     truncated.extend(chars.iter().skip(chars.len() - suffix_len));
     truncated
 }
@@ -1805,8 +1805,8 @@ fn show_scope_panel(
         ui.spacing_mut().item_spacing.x = 6.0;
         if ui
             .add_sized(
-                scope_button_size(ui, "Browse..."),
-                egui::Button::new("Browse..."),
+                scope_button_size(ui, "Browse…"),
+                egui::Button::new("Browse…"),
             )
             .clicked()
             && let Some(path) = pick_folder()
@@ -2186,7 +2186,7 @@ fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Durati
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new());
-                        ui.heading("Scanning...");
+                        ui.heading("Scanning…");
                     });
                     ui.add_space(6.0);
                     ui.label(scan_scope_display(paths));
@@ -2225,7 +2225,7 @@ fn show_scan_failed(
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
                 ui.add_space(12.0);
-                if ui.button("Open Folder...").clicked() {
+                if ui.button("Open Folder…").clicked() {
                     *retry_paths = pick_folder().map(|path| vec![path]);
                 }
                 if ui.button("Retry").clicked() {
