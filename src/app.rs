@@ -639,7 +639,7 @@ impl LoadedState {
                 ));
                 if let Some(path) = self.status_path() {
                     ui.separator();
-                    ui.label(path);
+                    status_path_label(ui, &path);
                 }
                 if let Some(message) = &self.status_message {
                     ui.separator();
@@ -1096,6 +1096,102 @@ fn icon_depth_slider(
     }
 
     next_value
+}
+
+fn status_path_label(ui: &mut egui::Ui, path: &str) {
+    let max_width = (ui.available_width() - status_controls_reserved_width(ui)).max(0.0);
+    if max_width <= 0.0 {
+        return;
+    }
+
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let text = middle_truncate_status_text(ui, path, &font_id, color, max_width);
+    let response = ui.add_sized(
+        egui::vec2(max_width, ui.spacing().interact_size.y),
+        egui::Label::new(text)
+            .truncate()
+            .sense(egui::Sense::click()),
+    );
+    show_immediate_tooltip(&response, "Copy full path");
+    if response.clicked() {
+        ui.ctx().copy_text(path.to_owned());
+    }
+}
+
+fn status_controls_reserved_width(ui: &egui::Ui) -> f32 {
+    let icon_width = 28.0;
+    let control_count = 5.0;
+    let separator_width = 12.0;
+    let spacing = ui.spacing().item_spacing.x;
+    control_count * icon_width + separator_width + 7.0 * spacing
+}
+
+fn middle_truncate_status_text(
+    ui: &egui::Ui,
+    text: &str,
+    font_id: &egui::FontId,
+    color: egui::Color32,
+    max_width: f32,
+) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if status_text_width(ui, text, font_id, color) <= max_width {
+        return text.to_owned();
+    }
+
+    const MARKER: &str = "...";
+    if status_text_width(ui, MARKER, font_id, color) > max_width {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut best = MARKER.to_owned();
+    let mut low = 0usize;
+    let mut high = chars.len().saturating_sub(1);
+    while low <= high {
+        let visible = (low + high) / 2;
+        let candidate = middle_truncate_status_chars(&chars, visible);
+        if status_text_width(ui, &candidate, font_id, color) <= max_width {
+            best = candidate;
+            low = visible + 1;
+        } else if visible == 0 {
+            break;
+        } else {
+            high = visible - 1;
+        }
+    }
+    best
+}
+
+fn middle_truncate_status_chars(chars: &[char], visible: usize) -> String {
+    if visible == 0 {
+        return "...".to_owned();
+    }
+
+    let suffix_len = ((visible * 2) / 3).max(1).min(chars.len());
+    let prefix_len = visible
+        .saturating_sub(suffix_len)
+        .min(chars.len() - suffix_len);
+
+    let mut truncated = String::with_capacity(visible + 3);
+    truncated.extend(chars.iter().take(prefix_len));
+    truncated.push_str("...");
+    truncated.extend(chars.iter().skip(chars.len() - suffix_len));
+    truncated
+}
+
+fn status_text_width(
+    ui: &egui::Ui,
+    text: &str,
+    font_id: &egui::FontId,
+    color: egui::Color32,
+) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font_id.clone(), color)
+        .size()
+        .x
 }
 
 fn show_immediate_tooltip(response: &egui::Response, text: &'static str) {
