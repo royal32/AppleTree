@@ -48,12 +48,14 @@ type ScanResult = Result<ScanCompletion, String>;
 struct ScanCompletion {
     tree: FileTree,
     color_map: ColorMap,
+    scan_paths: Vec<PathBuf>,
     scan_time_ms: f64,
 }
 
 struct LoadedState {
     tree: FileTree,
     color_map: ColorMap,
+    scan_paths: Vec<PathBuf>,
     pane: ui::PaneState,
     expanded: BTreeSet<NodeId>,
     table: ui::tree_view::TableState,
@@ -92,10 +94,10 @@ const SCOPE_PANEL_GAP: f32 = 8.0;
 const LEFT_RIGHT_SCOPE_PANEL_HEIGHT: f32 = 330.0;
 const LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT: f32 = 190.0;
 const FILE_TABLE_MIN_HEIGHT: f32 = 220.0;
-const SCOPE_LOGO_MAX_WIDTH: f32 = 150.0;
+const SCOPE_LOGO_MAX_WIDTH: f32 = 90.0;
 const SCOPE_LOGO_BOTTOM_GAP: f32 = 8.0;
 const SCOPE_LIST_MIN_HEIGHT: f32 = 96.0;
-const SCOPE_CONTROLS_HEIGHT: f32 = 104.0;
+const SCOPE_CONTROLS_HEIGHT: f32 = 44.0;
 
 struct MemoryRelief {
     until: Instant,
@@ -203,18 +205,14 @@ impl ScanScopeState {
     }
 
     fn checked_paths(&self) -> Vec<PathBuf> {
-        let mut seen = BTreeSet::new();
         let mut paths = Vec::new();
         for item in self.items.iter().filter(|item| item.checked) {
             if !item.path.is_dir() {
                 continue;
             }
-            let key = item.path.display().to_string();
-            if seen.insert(key) {
-                paths.push(item.path.clone());
-            }
+            paths.push(item.path.clone());
         }
-        paths
+        normalize_scope_paths(paths)
     }
 
     fn remove_checked_custom(&mut self) {
@@ -226,9 +224,12 @@ impl ScanScopeState {
     }
 }
 
-fn selected_scope_space(paths: &[PathBuf]) -> ScopeSpace {
+fn selected_scope_space(paths: &[PathBuf], used: u64) -> ScopeSpace {
     let mut seen_mounts = BTreeSet::new();
-    let mut space = ScopeSpace::default();
+    let mut space = ScopeSpace {
+        used,
+        ..ScopeSpace::default()
+    };
 
     for path in paths {
         let Some((mount, total, free)) = path_space(path) else {
@@ -240,8 +241,39 @@ fn selected_scope_space(paths: &[PathBuf]) -> ScopeSpace {
         space.total = space.total.saturating_add(total);
         space.free = space.free.saturating_add(free);
     }
-    space.used = space.total.saturating_sub(space.free);
     space
+}
+
+fn normalize_scope_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut paths = paths
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .map(|path| {
+            let key = canonical_scope_path(&path);
+            (key, path)
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|(a, _), (b, _)| {
+        a.components()
+            .count()
+            .cmp(&b.components().count())
+            .then_with(|| a.cmp(b))
+    });
+
+    let mut kept_keys: Vec<PathBuf> = Vec::new();
+    let mut normalized = Vec::new();
+    for (key, path) in paths {
+        if kept_keys.iter().any(|parent| key.starts_with(parent)) {
+            continue;
+        }
+        kept_keys.push(key);
+        normalized.push(path);
+    }
+    normalized
+}
+
+fn canonical_scope_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn path_space(path: &Path) -> Option<(String, u64, u64)> {
@@ -296,10 +328,8 @@ impl App {
         self.start_scan_paths(vec![path]);
     }
 
-    fn start_scan_paths(&mut self, mut paths: Vec<PathBuf>) {
-        paths.retain(|path| path.is_dir());
-        paths.sort();
-        paths.dedup();
+    fn start_scan_paths(&mut self, paths: Vec<PathBuf>) {
+        let paths = normalize_scope_paths(paths);
         if paths.is_empty() {
             return;
         }
@@ -323,6 +353,7 @@ impl App {
                     ScanCompletion {
                         tree,
                         color_map,
+                        scan_paths: worker_paths.clone(),
                         scan_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
                     }
                 }))
@@ -564,6 +595,7 @@ impl LoadedState {
         Self {
             tree: completion.tree,
             color_map: completion.color_map,
+            scan_paths: completion.scan_paths,
             pane: ui::PaneState::default(),
             expanded,
             table: ui::tree_view::TableState::default(),
@@ -835,6 +867,7 @@ impl LoadedState {
     ) -> Option<NodeCommand> {
         let mut command = None;
         let mut pending_scan = None;
+        let scope_space = selected_scope_space(&self.scan_paths, self.tree.root.size);
 
         let mut show_table = |ui: &mut egui::Ui| {
             if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
@@ -842,7 +875,7 @@ impl LoadedState {
             }
         };
         let mut show_scope = |ui: &mut egui::Ui| {
-            show_scope_logo(ui, scope_logo);
+            show_scope_logo(ui, scope_logo, Some(&scope_space));
             pending_scan = show_scope_panel(ui, scope, true);
         };
         match orientation {
@@ -1663,28 +1696,71 @@ fn show_table_scope_column(
     );
 }
 
-fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle) {
+fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, space: Option<&ScopeSpace>) {
     let width = ui.available_width().min(SCOPE_LOGO_MAX_WIDTH);
     let aspect = logo.size_vec2().y / logo.size_vec2().x;
-    let size = egui::vec2(width, width * aspect);
+    let logo_width = if space.is_some() {
+        width.min((ui.available_width() - 112.0).max(80.0))
+    } else {
+        width
+    };
+    let size = egui::vec2(logo_width, logo_width * aspect);
     let required_height =
         size.y + SCOPE_LOGO_BOTTOM_GAP + SCOPE_CONTROLS_HEIGHT + SCOPE_LIST_MIN_HEIGHT;
     if ui.available_height() < required_height {
         return;
     }
 
-    let (slot, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), size.y),
-        egui::Sense::hover(),
-    );
+    if let Some(space) = space {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), size.y),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                paint_scope_logo(ui, logo, size);
+                ui.add_space(8.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), size.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_height(size.y);
+                        ui.set_max_height(size.y);
+                        ui.vertical(|ui| {
+                            scope_stat_label(ui, format!("Total: {}", format_size(space.total)));
+                            scope_stat_label(ui, format!("Used: {}", format_size(space.used)));
+                            scope_stat_label(ui, format!("Free: {}", format_size(space.free)));
+                        });
+                    },
+                );
+            },
+        );
+    } else {
+        let (slot, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), size.y),
+            egui::Sense::hover(),
+        );
+        let image_rect = egui::Rect::from_center_size(slot.center(), size);
+        paint_scope_logo_at(ui, logo, image_rect);
+    }
+    ui.add_space(SCOPE_LOGO_BOTTOM_GAP);
+}
+
+fn scope_stat_label(ui: &mut egui::Ui, text: String) {
+    ui.label(egui::RichText::new(text).size(13.0));
+}
+
+fn paint_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, size: egui::Vec2) {
+    let (slot, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let image_rect = egui::Rect::from_center_size(slot.center(), size);
+    paint_scope_logo_at(ui, logo, image_rect);
+}
+
+fn paint_scope_logo_at(ui: &egui::Ui, logo: &egui::TextureHandle, image_rect: egui::Rect) {
     ui.painter().image(
         logo.id(),
         image_rect,
         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
         egui::Color32::WHITE,
     );
-    ui.add_space(SCOPE_LOGO_BOTTOM_GAP);
 }
 
 fn show_scope_panel(
@@ -1726,14 +1802,27 @@ fn show_scope_panel(
     ui.add_space(6.0);
     let mut checked_paths = Vec::new();
     ui.horizontal(|ui| {
-        if ui.button("Browse...").clicked()
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if ui
+            .add_sized(
+                scope_button_size(ui, "Browse..."),
+                egui::Button::new("Browse..."),
+            )
+            .clicked()
             && let Some(path) = pick_folder()
         {
             scope.add_custom_checked(&path);
         }
 
+        let remove_size = egui::vec2(
+            ui.spacing().interact_size.x * 1.1,
+            scope_button_size(ui, "Scan").y,
+        );
         let remove = ui
-            .add_enabled(scope.has_checked_custom(), egui::Button::new("-"))
+            .add_enabled(
+                scope.has_checked_custom(),
+                egui::Button::new("-").min_size(remove_size),
+            )
             .on_hover_text("Remove checked custom directories");
         if remove.clicked() {
             scope.remove_checked_custom();
@@ -1742,7 +1831,10 @@ fn show_scope_panel(
         checked_paths = scope.checked_paths();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add_enabled(!checked_paths.is_empty(), egui::Button::new("Scan"))
+                .add_enabled(
+                    !checked_paths.is_empty(),
+                    egui::Button::new("Scan").min_size(scope_button_size(ui, "Scan")),
+                )
                 .clicked()
             {
                 scan_request = Some(checked_paths.clone());
@@ -1750,13 +1842,23 @@ fn show_scope_panel(
         });
     });
 
-    let space = selected_scope_space(&checked_paths);
-    ui.add_space(4.0);
-    ui.small(format!("Total: {}", format_size(space.total)));
-    ui.small(format!("Used: {}", format_size(space.used)));
-    ui.small(format!("Free: {}", format_size(space.free)));
-
     scan_request
+}
+
+fn scope_button_size(ui: &egui::Ui, text: &str) -> egui::Vec2 {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_id, color)
+        .size()
+        .x;
+    let padding = ui.spacing().button_padding;
+    let base = egui::vec2(
+        (text_width + padding.x * 2.0).max(ui.spacing().interact_size.x),
+        ui.spacing().interact_size.y,
+    );
+    base * 1.1
 }
 
 /// Snapshot of a node's metadata needed for deletion.
@@ -1951,7 +2053,7 @@ fn show_empty_panes(
         ui::tree_view::show_empty(ui, prefs, prefs_changed);
     };
     let mut show_scope = |ui: &mut egui::Ui| {
-        show_scope_logo(ui, scope_logo);
+        show_scope_logo(ui, scope_logo, None);
         if let Some(paths) = show_scope_panel(ui, scope, enabled) {
             *scan_request = Some(paths);
         }
@@ -2240,4 +2342,19 @@ fn pick_folder() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Select folder to scan")
         .pick_folder()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_paths_drop_nested_selections() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let nested = root.join("src");
+
+        let paths = normalize_scope_paths(vec![nested, root.clone(), root.clone()]);
+
+        assert_eq!(paths, vec![root]);
+    }
 }
