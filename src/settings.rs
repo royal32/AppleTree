@@ -47,6 +47,42 @@ impl FilenameTruncation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreemapPalette {
+    Classic,
+    Pastel,
+    DesaturatedRedFrames,
+}
+
+impl TreemapPalette {
+    pub const ALL: [Self; 3] = [Self::Classic, Self::Pastel, Self::DesaturatedRedFrames];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Pastel => "Pastel",
+            Self::DesaturatedRedFrames => "Desaturated\n(Directory Focused)",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Pastel => "pastel",
+            Self::DesaturatedRedFrames => "desaturated_red_frames",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "classic" => Some(Self::Classic),
+            "pastel" => Some(Self::Pastel),
+            "desaturated_red_frames" => Some(Self::DesaturatedRedFrames),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableColumn {
     Name,
     Size,
@@ -134,6 +170,7 @@ pub struct AppPrefs {
     pub treemap_folder_depth: usize,
     pub treemap_label_depth: usize,
     pub filename_truncation: FilenameTruncation,
+    pub treemap_palette: TreemapPalette,
 }
 
 impl Default for AppPrefs {
@@ -153,6 +190,7 @@ impl Default for AppPrefs {
             treemap_folder_depth: 2,
             treemap_label_depth: 1,
             filename_truncation: FilenameTruncation::Middle,
+            treemap_palette: TreemapPalette::Classic,
         }
     }
 }
@@ -211,6 +249,11 @@ impl AppPrefs {
                         prefs.filename_truncation = truncation;
                     }
                 }
+                "treemap_palette" => {
+                    if let Some(palette) = TreemapPalette::parse(value.trim()) {
+                        prefs.treemap_palette = palette;
+                    }
+                }
                 _ => {}
             }
         }
@@ -237,7 +280,7 @@ impl AppPrefs {
             .join(",");
         let direction = if self.sort_descending { "desc" } else { "asc" };
         let text = format!(
-            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\nfilename_truncation={}\n",
+            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\nfilename_truncation={}\ntreemap_palette={}\n",
             self.split_orientation.as_str(),
             self.sort_column.id(),
             direction,
@@ -246,6 +289,7 @@ impl AppPrefs {
             self.treemap_folder_depth,
             self.treemap_label_depth,
             self.filename_truncation.as_str(),
+            self.treemap_palette.as_str(),
         );
         if let Err(e) = std::fs::write(&path, text) {
             eprintln!("Failed to save settings {:?}: {}", path, e);

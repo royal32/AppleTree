@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::model::color::ColorMap;
+use crate::model::color::{ColorMap, folder_frame_color, palette_colors};
 use crate::model::tree::{FileTree, NodeId};
-use crate::settings::{AppPrefs, FilenameTruncation, SplitOrientation};
+use crate::settings::{AppPrefs, FilenameTruncation, SplitOrientation, TreemapPalette};
 use crate::ui::file_icons::FileIconCache;
 use crate::ui::{self, NodeCommand};
 use crate::{format_compact_count, format_size};
@@ -66,6 +66,7 @@ struct LoadedState {
     memory_relief: MemoryRelief,
     last_file_label_depth: usize,
     last_folder_label_depth: usize,
+    palette_preview: Option<TreemapPalette>,
 }
 
 struct ScanScopeState {
@@ -575,6 +576,7 @@ impl LoadedState {
             memory_relief: MemoryRelief::new(),
             last_file_label_depth: default_prefs.treemap_label_depth,
             last_folder_label_depth: default_prefs.treemap_folder_depth,
+            palette_preview: None,
         }
     }
 
@@ -650,6 +652,18 @@ impl LoadedState {
                     }
                     if filename_truncation_toggle(ui, &mut prefs.filename_truncation) {
                         *prefs_changed = true;
+                    }
+                    let palette_response = color_palette_control(ui, prefs.treemap_palette);
+                    if let Some(palette) = palette_response.selected {
+                        prefs.treemap_palette = palette;
+                        *prefs_changed = true;
+                    }
+                    if self.palette_preview != palette_response.hovered
+                        || palette_response.selected.is_some()
+                    {
+                        self.palette_preview = palette_response.hovered;
+                        self.treemap.clear_texture();
+                        self.memory_relief.restart();
                     }
 
                     ui.separator();
@@ -855,6 +869,7 @@ impl LoadedState {
             &self.color_map,
             &self.deleted,
             prefs,
+            self.palette_preview.unwrap_or(prefs.treemap_palette),
             &mut self.treemap,
         )
     }
@@ -869,10 +884,16 @@ impl LoadedState {
 
 #[derive(Clone, Copy)]
 enum StatusIcon {
+    ColorPalette,
     FileLabels,
     FolderLabels,
     FilenameTruncation,
     SplitLayout,
+}
+
+struct PaletteControlResponse {
+    hovered: Option<TreemapPalette>,
+    selected: Option<TreemapPalette>,
 }
 
 fn split_layout_toggle(ui: &mut egui::Ui, orientation: &mut SplitOrientation) -> bool {
@@ -894,6 +915,100 @@ fn split_layout_toggle(ui: &mut egui::Ui, orientation: &mut SplitOrientation) ->
         };
     }
     clicked
+}
+
+fn color_palette_control(ui: &mut egui::Ui, selected: TreemapPalette) -> PaletteControlResponse {
+    let response = status_icon_button(ui, StatusIcon::ColorPalette, 0, true);
+    show_immediate_tooltip(&response, "Treemap colors");
+
+    let popup_id = response.id.with("palette_popup");
+    let pointer_pos = ui.ctx().pointer_hover_pos();
+    let popup_hovered = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::Rect>(popup_id))
+        .is_some_and(|rect| pointer_pos.is_some_and(|pos| rect.expand(6.0).contains(pos)));
+
+    let mut result = PaletteControlResponse {
+        hovered: None,
+        selected: None,
+    };
+
+    if response.hovered() || popup_hovered {
+        let popup_pos = response.rect.left_top() + egui::vec2(0.0, -6.0);
+        let inner = egui::Area::new(popup_id)
+            .order(egui::Order::Tooltip)
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(popup_pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for palette in TreemapPalette::ALL {
+                            let tile = palette_tile(ui, palette, palette == selected);
+                            if tile.hovered() {
+                                result.hovered = Some(palette);
+                            }
+                            if tile.clicked() {
+                                result.selected = Some(palette);
+                            }
+                            show_immediate_tooltip(&tile, palette.label());
+                        }
+                    });
+                });
+            });
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(popup_id, inner.response.rect));
+    } else {
+        ui.ctx()
+            .data_mut(|data| data.remove::<egui::Rect>(popup_id));
+    }
+
+    result
+}
+
+fn palette_tile(ui: &mut egui::Ui, palette: TreemapPalette, selected: bool) -> egui::Response {
+    let size = egui::vec2(54.0, 34.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter();
+
+    painter.rect_filled(rect, 4.0, visuals.bg_fill);
+
+    let swatch_rect = rect.shrink2(egui::vec2(5.0, 6.0));
+    let colors = palette_colors(palette);
+    let stripe_w = swatch_rect.width() / 6.0;
+    for i in 0..6 {
+        let stripe = egui::Rect::from_min_max(
+            egui::pos2(swatch_rect.left() + i as f32 * stripe_w, swatch_rect.top()),
+            egui::pos2(
+                if i == 5 {
+                    swatch_rect.right()
+                } else {
+                    swatch_rect.left() + (i + 1) as f32 * stripe_w
+                },
+                swatch_rect.bottom(),
+            ),
+        );
+        painter.rect_filled(stripe, 0.0, colors[i]);
+    }
+    if palette == TreemapPalette::DesaturatedRedFrames {
+        painter.rect_stroke(
+            swatch_rect,
+            0.0,
+            egui::Stroke::new(1.5, folder_frame_color(palette)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let stroke = if selected {
+        egui::Stroke::new(1.5, ui.visuals().selection.stroke.color)
+    } else if response.hovered() || response.has_focus() {
+        visuals.bg_stroke
+    } else {
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    };
+    painter.rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
+
+    response
 }
 
 fn filename_truncation_toggle(ui: &mut egui::Ui, truncation: &mut FilenameTruncation) -> bool {
@@ -1074,6 +1189,7 @@ fn status_icon_button_transformed(
     };
     let stroke = egui::Stroke::new(0.75, stroke_color);
     match icon {
+        StatusIcon::ColorPalette => paint_color_palette_icon(painter, icon_rect, stroke),
         StatusIcon::FileLabels => paint_file_label_icon(painter, icon_rect, stroke),
         StatusIcon::FolderLabels => paint_folder_label_icon(painter, icon_rect, stroke),
         StatusIcon::FilenameTruncation => {
@@ -1196,6 +1312,58 @@ fn paint_file_label_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui
         &[(4.5, 3.75), (4.5, 20.25), (11.5, 20.25)],
     );
     paint_eye_icon(painter, rect, stroke);
+}
+
+fn paint_color_palette_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    // Geometry mirrors src/ui/assets/color-palette.svg closely enough for the 20px status icon.
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        false,
+        &[
+            (12.0, 3.25),
+            (7.17, 3.25),
+            (3.25, 7.17),
+            (3.25, 12.0),
+            (3.25, 16.83),
+            (7.17, 20.75),
+            (12.0, 20.75),
+            (13.15, 20.75),
+        ],
+    );
+    painter.circle_stroke(
+        icon_pos(rect, 13.15, 18.9, 0),
+        rect.width() * 1.85 / 24.0,
+        stroke,
+    );
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        false,
+        &[(14.7, 17.83), (14.22, 17.35), (14.14, 16.88)],
+    );
+    painter.circle_stroke(
+        icon_pos(rect, 16.0, 13.13, 0),
+        rect.width() * 3.45 / 24.0,
+        stroke,
+    );
+    paint_svg_polyline(
+        painter,
+        rect,
+        stroke,
+        false,
+        &[(16.0, 13.13), (16.0, 15.13), (20.75, 13.13)],
+    );
+
+    for (x, y) in [(7.75, 10.0), (10.1, 6.85), (14.15, 6.85), (16.6, 10.0)] {
+        painter.circle_filled(
+            icon_pos(rect, x, y, 0),
+            rect.width() * 1.0 / 24.0,
+            stroke.color,
+        );
+    }
 }
 
 fn paint_filename_truncation_icon(
@@ -1755,6 +1923,10 @@ fn show_empty_status_bar(
                     *prefs_changed = true;
                 }
                 if filename_truncation_toggle(ui, &mut prefs.filename_truncation) {
+                    *prefs_changed = true;
+                }
+                if let Some(palette) = color_palette_control(ui, prefs.treemap_palette).selected {
+                    prefs.treemap_palette = palette;
                     *prefs_changed = true;
                 }
 

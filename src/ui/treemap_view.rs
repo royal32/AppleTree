@@ -5,9 +5,12 @@ use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, pos2
 use treemap::{Mappable, TreemapLayout};
 
 use crate::format_size;
-use crate::model::color::{ColorMap, PALETTE_BRIGHTNESS};
+use crate::model::color::{
+    ColorMap, PALETTE_BRIGHTNESS, folder_content_color, folder_frame_color, folder_header_color,
+    folder_shell_color,
+};
 use crate::model::tree::{FileNode, FileTree, NodeId};
-use crate::settings::{AppPrefs, FilenameTruncation};
+use crate::settings::{AppPrefs, FilenameTruncation, TreemapPalette};
 use crate::ui::{self, ActivePane, DeletionOverlay, NodeCommand, PaneState};
 
 /// Cushion surface coefficients: [a_x, a_y, c_x, c_y]
@@ -65,6 +68,7 @@ pub struct TreemapState {
     pub zoom_history: Vec<NodeId>,
     pub shrunk_nodes: BTreeSet<NodeId>,
     cached_layout_rect: Option<Rect>,
+    cached_palette: Option<TreemapPalette>,
     cache: TreemapCache,
     texture: Option<TextureHandle>,
 }
@@ -85,6 +89,7 @@ impl TreemapState {
             zoom_history: Vec::new(),
             shrunk_nodes: BTreeSet::new(),
             cached_layout_rect: None,
+            cached_palette: None,
             cache: TreemapCache::default(),
             texture: None,
         }
@@ -92,7 +97,13 @@ impl TreemapState {
 
     pub fn clear_layout(&mut self) {
         self.cached_layout_rect = None;
+        self.cached_palette = None;
         self.cache.clear();
+        self.texture = None;
+    }
+
+    pub fn clear_texture(&mut self) {
+        self.cached_palette = None;
         self.texture = None;
     }
 
@@ -161,6 +172,7 @@ pub fn show(
     color_map: &ColorMap,
     deleted: &DeletionOverlay,
     prefs: &AppPrefs,
+    palette: TreemapPalette,
     state: &mut TreemapState,
 ) -> Option<NodeCommand> {
     let mut command = None;
@@ -188,6 +200,7 @@ pub fn show(
             || (canvas.top() - cached.top()).abs() > 1.0
             || (w - cached.width()).abs() > 1.0
             || (h - cached.height()).abs() > 1.0
+            || state.cached_palette != Some(palette)
     } else {
         true
     };
@@ -213,6 +226,7 @@ pub fn show(
                 CUSHION_HEIGHT,
                 true,
                 color_map,
+                palette,
                 &mut leaves,
             );
         }
@@ -229,13 +243,14 @@ pub fn show(
         }
 
         state.cached_layout_rect = Some(canvas);
+        state.cached_palette = Some(palette);
     }
 
     let Some(display_root) = tree.node(display_root_id) else {
         return command;
     };
 
-    paint_folder_backgrounds(&painter, display_root, &state.cache, 0, prefs);
+    paint_folder_backgrounds(&painter, display_root, &state.cache, 0, prefs, palette);
 
     // Paint the cached file-cushion texture over transparent folder content.
     if let Some(tex) = &state.texture {
@@ -309,7 +324,15 @@ pub fn show(
         });
     }
 
-    paint_folder_labels_and_borders(&painter, display_root, &state.cache, 0, prefs, deleted);
+    paint_folder_labels_and_borders(
+        &painter,
+        display_root,
+        &state.cache,
+        0,
+        prefs,
+        palette,
+        deleted,
+    );
     paint_file_labels(&painter, display_root, &state.cache, prefs, deleted);
     paint_shrink_markers(
         &painter,
@@ -384,6 +407,7 @@ pub(crate) fn benchmark_render(
         CUSHION_HEIGHT,
         true,
         color_map,
+        prefs.treemap_palette,
         &mut leaves,
     );
     let layout = layout_start.elapsed();
@@ -536,6 +560,7 @@ fn collect_cushion_leaves(
     h: f64,
     is_root: bool,
     color_map: &ColorMap,
+    palette: TreemapPalette,
     leaves: &mut Vec<CushionLeaf>,
 ) {
     let Some(rect) = cache.rect(node.id) else {
@@ -551,7 +576,7 @@ fn collect_cushion_leaves(
         if node.is_dir {
             return;
         }
-        let color = color_map.get_treemap(node.extension());
+        let color = color_map.get_treemap(node.extension(), palette);
         leaves.push(CushionLeaf {
             rect: *rect,
             surface,
@@ -560,7 +585,9 @@ fn collect_cushion_leaves(
     } else {
         let child_h = h * CUSHION_SCALE;
         for child in node.children.iter() {
-            collect_cushion_leaves(child, cache, surface, child_h, false, color_map, leaves);
+            collect_cushion_leaves(
+                child, cache, surface, child_h, false, color_map, palette, leaves,
+            );
         }
     }
 }
@@ -654,6 +681,7 @@ fn paint_folder_backgrounds(
     cache: &TreemapCache,
     depth: usize,
     prefs: &AppPrefs,
+    palette: TreemapPalette,
 ) {
     if !node.is_dir {
         return;
@@ -664,18 +692,18 @@ fn paint_folder_backgrounds(
     };
     let rect = to_egui_rect(layout_rect);
     if depth <= prefs.treemap_folder_depth {
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(40, 40, 40));
+        painter.rect_filled(rect, 0.0, folder_shell_color(palette));
 
         if let Some(header) = folder_header_rect(layout_rect, depth, prefs) {
-            painter.rect_filled(to_egui_rect(&header), 0.0, Color32::from_rgb(50, 50, 50));
+            painter.rect_filled(to_egui_rect(&header), 0.0, folder_header_color(palette));
         }
 
         let content = folder_content_rect(layout_rect, depth, prefs);
-        painter.rect_filled(to_egui_rect(&content), 0.0, Color32::from_rgb(28, 28, 28));
+        painter.rect_filled(to_egui_rect(&content), 0.0, folder_content_color(palette));
     }
 
     for child in node.children.iter() {
-        paint_folder_backgrounds(painter, child, cache, depth + 1, prefs);
+        paint_folder_backgrounds(painter, child, cache, depth + 1, prefs, palette);
     }
 }
 
@@ -685,6 +713,7 @@ fn paint_folder_labels_and_borders(
     cache: &TreemapCache,
     depth: usize,
     prefs: &AppPrefs,
+    palette: TreemapPalette,
     deleted: &DeletionOverlay,
 ) {
     if !node.is_dir {
@@ -724,13 +753,13 @@ fn paint_folder_labels_and_borders(
         painter.rect_stroke(
             rect,
             0.0,
-            egui::Stroke::new(1.0, Color32::from_rgb(76, 76, 76)),
+            egui::Stroke::new(1.0, folder_frame_color(palette)),
             egui::StrokeKind::Inside,
         );
     }
 
     for child in node.children.iter() {
-        paint_folder_labels_and_borders(painter, child, cache, depth + 1, prefs, deleted);
+        paint_folder_labels_and_borders(painter, child, cache, depth + 1, prefs, palette, deleted);
     }
 }
 

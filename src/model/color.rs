@@ -1,5 +1,7 @@
 use egui::Color32;
 
+use crate::settings::TreemapPalette;
+
 pub const PALETTE_BRIGHTNESS: f64 = 0.6;
 
 // 18 distinct hues, normalized below as cushion treemap base colors.
@@ -36,6 +38,48 @@ const PALETTE_TREEMAP: [Color32; 18] = {
     }
     result
 };
+
+const PASTEL_PALETTE: [Color32; 18] = [
+    Color32::from_rgb(126, 182, 255),
+    Color32::from_rgb(255, 142, 142),
+    Color32::from_rgb(132, 216, 157),
+    Color32::from_rgb(206, 158, 232),
+    Color32::from_rgb(241, 188, 118),
+    Color32::from_rgb(119, 210, 210),
+    Color32::from_rgb(239, 139, 179),
+    Color32::from_rgb(160, 170, 232),
+    Color32::from_rgb(130, 194, 159),
+    Color32::from_rgb(224, 160, 118),
+    Color32::from_rgb(188, 146, 238),
+    Color32::from_rgb(120, 190, 226),
+    Color32::from_rgb(224, 154, 184),
+    Color32::from_rgb(189, 204, 120),
+    Color32::from_rgb(230, 138, 211),
+    Color32::from_rgb(116, 176, 197),
+    Color32::from_rgb(198, 158, 135),
+    Color32::from_rgb(176, 136, 210),
+];
+
+const DESATURATED_PALETTE: [Color32; 18] = [
+    Color32::from_rgb(98, 118, 152),
+    Color32::from_rgb(154, 100, 96),
+    Color32::from_rgb(101, 135, 103),
+    Color32::from_rgb(134, 104, 142),
+    Color32::from_rgb(148, 125, 93),
+    Color32::from_rgb(94, 134, 134),
+    Color32::from_rgb(148, 96, 118),
+    Color32::from_rgb(116, 118, 148),
+    Color32::from_rgb(92, 126, 111),
+    Color32::from_rgb(142, 112, 88),
+    Color32::from_rgb(128, 100, 150),
+    Color32::from_rgb(88, 122, 146),
+    Color32::from_rgb(145, 108, 124),
+    Color32::from_rgb(126, 132, 90),
+    Color32::from_rgb(146, 96, 134),
+    Color32::from_rgb(84, 116, 128),
+    Color32::from_rgb(132, 112, 98),
+    Color32::from_rgb(116, 94, 132),
+];
 
 /// WinDirStat MakeBrightColor + NormalizeColor algorithm.
 /// Scales RGB so average brightness = target, then redistributes overflow.
@@ -123,7 +167,7 @@ const DIR_COLOR: Color32 = Color32::from_rgb(100, 100, 100);
 
 /// Maps extensions to cushion treemap base colors.
 pub struct ColorMap {
-    map: std::collections::HashMap<Box<str>, Color32>,
+    map: std::collections::HashMap<Box<str>, usize>,
 }
 
 impl ColorMap {
@@ -131,20 +175,62 @@ impl ColorMap {
     pub fn from_extensions(extensions: &[(Box<str>, u64)]) -> Self {
         let mut map = std::collections::HashMap::new();
         for (i, (ext, _)) in extensions.iter().enumerate() {
-            let idx = i % PALETTE_TREEMAP.len();
-            map.insert(ext.clone(), PALETTE_TREEMAP[idx]);
+            map.insert(ext.clone(), i);
         }
         Self { map }
     }
 
     /// Get treemap base color for an extension (normalized to brightness 0.6 for cushion shading).
-    pub fn get_treemap(&self, extension: &str) -> Color32 {
+    pub fn get_treemap(&self, extension: &str, palette: TreemapPalette) -> Color32 {
         if extension.is_empty() {
             return DIR_COLOR;
         }
-        self.map
+        let index = self
+            .map
             .get(extension)
             .copied()
-            .unwrap_or(PALETTE_TREEMAP[PALETTE_TREEMAP.len() - 1])
+            .unwrap_or_else(|| palette_colors(palette).len() - 1);
+        palette_color(palette, index)
+    }
+}
+
+pub fn palette_colors(palette: TreemapPalette) -> &'static [Color32; 18] {
+    match palette {
+        TreemapPalette::Classic => &PALETTE_TREEMAP,
+        TreemapPalette::Pastel => &PASTEL_PALETTE,
+        TreemapPalette::DesaturatedRedFrames => &DESATURATED_PALETTE,
+    }
+}
+
+pub fn palette_color(palette: TreemapPalette, index: usize) -> Color32 {
+    let colors = palette_colors(palette);
+    colors[index % colors.len()]
+}
+
+pub fn folder_frame_color(palette: TreemapPalette) -> Color32 {
+    match palette {
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(76, 76, 76),
+        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(255, 38, 52),
+    }
+}
+
+pub fn folder_shell_color(palette: TreemapPalette) -> Color32 {
+    match palette {
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(40, 40, 40),
+        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(82, 24, 28),
+    }
+}
+
+pub fn folder_header_color(palette: TreemapPalette) -> Color32 {
+    match palette {
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(50, 50, 50),
+        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(122, 26, 34),
+    }
+}
+
+pub fn folder_content_color(palette: TreemapPalette) -> Color32 {
+    match palette {
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(28, 28, 28),
+        TreemapPalette::DesaturatedRedFrames => Color32::from_rgb(30, 26, 26),
     }
 }
