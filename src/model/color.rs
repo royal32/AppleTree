@@ -207,30 +207,46 @@ pub fn palette_color(palette: TreemapPalette, index: usize) -> Color32 {
     colors[index % colors.len()]
 }
 
-pub fn folder_frame_color(palette: TreemapPalette) -> Color32 {
+pub fn folder_frame_color(palette: TreemapPalette, dark_mode: bool) -> Color32 {
     match palette {
-        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(76, 76, 76),
-        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(255, 38, 244),
+        TreemapPalette::Classic | TreemapPalette::Pastel if dark_mode => {
+            Color32::from_rgb(76, 76, 76)
+        }
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(176, 176, 176),
+        TreemapPalette::DesaturatedBoldFrames if dark_mode => Color32::from_rgb(255, 38, 244),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(190, 42, 180),
     }
 }
 
-pub fn folder_shell_color(palette: TreemapPalette) -> Color32 {
+pub fn folder_shell_color(palette: TreemapPalette, dark_mode: bool) -> Color32 {
     match palette {
-        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(40, 40, 40),
-        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(82, 24, 28),
+        TreemapPalette::Classic | TreemapPalette::Pastel if dark_mode => {
+            Color32::from_rgb(40, 40, 40)
+        }
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(230, 230, 230),
+        TreemapPalette::DesaturatedBoldFrames if dark_mode => Color32::from_rgb(82, 24, 28),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(245, 220, 224),
     }
 }
 
-pub fn folder_header_color(palette: TreemapPalette) -> Color32 {
+pub fn folder_header_color(palette: TreemapPalette, dark_mode: bool) -> Color32 {
     match palette {
-        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(50, 50, 50),
-        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(122, 26, 108),
+        TreemapPalette::Classic | TreemapPalette::Pastel if dark_mode => {
+            Color32::from_rgb(50, 50, 50)
+        }
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(242, 242, 242),
+        TreemapPalette::DesaturatedBoldFrames if dark_mode => Color32::from_rgb(122, 26, 108),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(252, 230, 248),
     }
 }
 
-pub fn folder_content_color(palette: TreemapPalette) -> Color32 {
+pub fn folder_content_color(palette: TreemapPalette, dark_mode: bool) -> Color32 {
     match palette {
-        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(28, 28, 28),
-        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(30, 26, 26),
+        TreemapPalette::Classic | TreemapPalette::Pastel if dark_mode => {
+            Color32::from_rgb(28, 28, 28)
+        }
+        TreemapPalette::Classic | TreemapPalette::Pastel => Color32::from_rgb(248, 248, 248),
+        TreemapPalette::DesaturatedBoldFrames if dark_mode => Color32::from_rgb(30, 26, 26),
+        TreemapPalette::DesaturatedBoldFrames => Color32::from_rgb(253, 244, 245),
     }
 }

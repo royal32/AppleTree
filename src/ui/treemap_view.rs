@@ -151,6 +151,32 @@ const AMBIENT: f64 = 0.13;
 const DIFFUSE: f64 = 1.0 - AMBIENT;
 const BRIGHTNESS_FACTOR: f64 = 0.88 / PALETTE_BRIGHTNESS;
 
+fn treemap_canvas_fill(visuals: &egui::Visuals) -> Color32 {
+    visuals.extreme_bg_color
+}
+
+fn treemap_folder_label_color(dark_mode: bool, deleted: bool) -> Color32 {
+    if deleted {
+        if dark_mode {
+            Color32::from_rgb(255, 82, 82)
+        } else {
+            Color32::from_rgb(190, 35, 35)
+        }
+    } else if dark_mode {
+        Color32::from_rgb(235, 235, 235)
+    } else {
+        Color32::from_rgb(35, 35, 35)
+    }
+}
+
+fn treemap_file_label_color(deleted: bool) -> Color32 {
+    if deleted {
+        Color32::from_rgb(255, 70, 70)
+    } else {
+        Color32::from_rgb(235, 235, 235)
+    }
+}
+
 impl Mappable for LayoutItem {
     fn size(&self) -> f64 {
         self.size
@@ -250,7 +276,17 @@ pub fn show(
         return command;
     };
 
-    paint_folder_backgrounds(&painter, display_root, &state.cache, 0, prefs, palette);
+    let dark_mode = ui.visuals().dark_mode;
+    painter.rect_filled(canvas, 0.0, treemap_canvas_fill(ui.visuals()));
+    paint_folder_backgrounds(
+        &painter,
+        display_root,
+        &state.cache,
+        0,
+        prefs,
+        palette,
+        dark_mode,
+    );
 
     // Paint the cached file-cushion texture over transparent folder content.
     if let Some(tex) = &state.texture {
@@ -332,6 +368,7 @@ pub fn show(
         prefs,
         palette,
         deleted,
+        dark_mode,
     );
     paint_file_labels(&painter, display_root, &state.cache, prefs, deleted);
     paint_shrink_markers(
@@ -379,8 +416,13 @@ pub fn show_empty(ui: &mut egui::Ui) {
     }
 
     let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(40, 40, 40));
-    painter.rect_filled(rect.shrink(1.0), 0.0, Color32::from_rgb(28, 28, 28));
+    painter.rect_filled(rect, 0.0, treemap_canvas_fill(ui.visuals()));
+    painter.rect_stroke(
+        rect.shrink(0.5),
+        0.0,
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
 }
 
 pub(crate) fn benchmark_render(
@@ -682,6 +724,7 @@ fn paint_folder_backgrounds(
     depth: usize,
     prefs: &AppPrefs,
     palette: TreemapPalette,
+    dark_mode: bool,
 ) {
     if !node.is_dir {
         return;
@@ -692,18 +735,26 @@ fn paint_folder_backgrounds(
     };
     let rect = to_egui_rect(layout_rect);
     if depth <= prefs.treemap_folder_depth {
-        painter.rect_filled(rect, 0.0, folder_shell_color(palette));
+        painter.rect_filled(rect, 0.0, folder_shell_color(palette, dark_mode));
 
         if let Some(header) = folder_header_rect(layout_rect, depth, prefs) {
-            painter.rect_filled(to_egui_rect(&header), 0.0, folder_header_color(palette));
+            painter.rect_filled(
+                to_egui_rect(&header),
+                0.0,
+                folder_header_color(palette, dark_mode),
+            );
         }
 
         let content = folder_content_rect(layout_rect, depth, prefs);
-        painter.rect_filled(to_egui_rect(&content), 0.0, folder_content_color(palette));
+        painter.rect_filled(
+            to_egui_rect(&content),
+            0.0,
+            folder_content_color(palette, dark_mode),
+        );
     }
 
     for child in node.children.iter() {
-        paint_folder_backgrounds(painter, child, cache, depth + 1, prefs, palette);
+        paint_folder_backgrounds(painter, child, cache, depth + 1, prefs, palette, dark_mode);
     }
 }
 
@@ -715,6 +766,7 @@ fn paint_folder_labels_and_borders(
     prefs: &AppPrefs,
     palette: TreemapPalette,
     deleted: &DeletionOverlay,
+    dark_mode: bool,
 ) {
     if !node.is_dir {
         return;
@@ -729,11 +781,7 @@ fn paint_folder_labels_and_borders(
             let header_rect = to_egui_rect(&header);
             let label_pos = pos2(header_rect.left() + 2.0, header_rect.center().y);
             let font_id = egui::FontId::monospace(LABEL_FONT_SIZE);
-            let color = if deleted.is_node_deleted(node.id) {
-                Color32::from_rgb(255, 70, 70)
-            } else {
-                Color32::from_rgb(235, 235, 235)
-            };
+            let color = treemap_folder_label_color(dark_mode, deleted.is_node_deleted(node.id));
             let label = node_size_label(
                 painter,
                 node,
@@ -753,13 +801,22 @@ fn paint_folder_labels_and_borders(
         painter.rect_stroke(
             rect,
             0.0,
-            egui::Stroke::new(1.0, folder_frame_color(palette)),
+            egui::Stroke::new(1.0, folder_frame_color(palette, dark_mode)),
             egui::StrokeKind::Inside,
         );
     }
 
     for child in node.children.iter() {
-        paint_folder_labels_and_borders(painter, child, cache, depth + 1, prefs, palette, deleted);
+        paint_folder_labels_and_borders(
+            painter,
+            child,
+            cache,
+            depth + 1,
+            prefs,
+            palette,
+            deleted,
+            dark_mode,
+        );
     }
 }
 
@@ -795,11 +852,7 @@ fn paint_file_labels(
     // );
     let label_pos = pos2(header.left() + 2.0, header.center().y);
     let font_id = egui::FontId::monospace(LABEL_FONT_SIZE);
-    let color = if deleted.is_node_deleted(node.id) {
-        Color32::from_rgb(255, 70, 70)
-    } else {
-        Color32::from_rgb(235, 235, 235)
-    };
+    let color = treemap_file_label_color(deleted.is_node_deleted(node.id));
     let label = node_size_label(
         painter,
         node,

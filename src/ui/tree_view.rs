@@ -111,6 +111,37 @@ impl TableLayout {
     }
 }
 
+fn table_frame_fill(visuals: &egui::Visuals) -> Color32 {
+    visuals.extreme_bg_color
+}
+
+fn table_alt_row_fill(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        mix_color(visuals.extreme_bg_color, Color32::WHITE, 0.05)
+    } else {
+        mix_color(visuals.extreme_bg_color, Color32::BLACK, 0.04)
+    }
+}
+
+fn deleted_text_color(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        Color32::from_rgb(255, 82, 82)
+    } else {
+        Color32::from_rgb(190, 35, 35)
+    }
+}
+
+fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(a.r(), b.r()),
+        mix(a.g(), b.g()),
+        mix(a.b(), b.b()),
+        mix(a.a(), b.a()),
+    )
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     tree: &FileTree,
@@ -129,16 +160,8 @@ pub fn show(
 
     expanded.insert(tree.root.id);
 
-    let frame_fill = if ui.visuals().dark_mode {
-        Color32::from_rgb(38, 38, 38)
-    } else {
-        Color32::from_rgb(236, 236, 236)
-    };
-    let alt_row_color = if ui.visuals().dark_mode {
-        Color32::from_rgb(46, 46, 46)
-    } else {
-        Color32::from_rgb(226, 226, 226)
-    };
+    let frame_fill = table_frame_fill(ui.visuals());
+    let alt_row_color = table_alt_row_fill(ui.visuals());
 
     let mut command = None;
 
@@ -213,11 +236,7 @@ pub fn show(
 }
 
 pub fn show_empty(ui: &mut egui::Ui, prefs: &mut AppPrefs, prefs_changed: &mut bool) {
-    let frame_fill = if ui.visuals().dark_mode {
-        Color32::from_rgb(38, 38, 38)
-    } else {
-        Color32::from_rgb(236, 236, 236)
-    };
+    let frame_fill = table_frame_fill(ui.visuals());
 
     let frame = egui::Frame::new()
         .fill(frame_fill)
@@ -276,7 +295,7 @@ fn show_header(
                 egui::Align2::LEFT_CENTER,
                 format!("{}{}", column.title(), sort),
                 egui::FontId::proportional(12.0),
-                Color32::from_rgb(220, 220, 220),
+                ui.visuals().widgets.inactive.fg_stroke.color,
             );
 
             if response.clicked() {
@@ -387,11 +406,11 @@ fn paint_cell(
     is_deleted: bool,
 ) {
     let text_color = if is_deleted {
-        Color32::from_rgb(230, 45, 45)
+        deleted_text_color(ui.visuals())
     } else if is_selected {
-        Color32::WHITE
+        ui.visuals().selection.stroke.color
     } else {
-        Color32::from_rgb(220, 220, 220)
+        ui.visuals().text_color()
     };
     match column {
         TableColumn::Name => {

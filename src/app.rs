@@ -1065,7 +1065,7 @@ fn palette_tile(ui: &mut egui::Ui, palette: TreemapPalette, selected: bool) -> e
         painter.rect_stroke(
             swatch_rect,
             0.0,
-            egui::Stroke::new(1.5, folder_frame_color(palette)),
+            egui::Stroke::new(1.5, folder_frame_color(palette, ui.visuals().dark_mode)),
             egui::StrokeKind::Inside,
         );
     }
