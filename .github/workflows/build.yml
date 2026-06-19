@@ -38,9 +38,29 @@ jobs:
       - name: Package app bundle
         run: CODESIGN=0 scripts/package-macos-app.sh
 
-      - name: Upload app bundle
+      - name: Create distributable ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          mkdir -p dist
+      
+          ditto -c -k \
+            --sequesterRsrc \
+            --keepParent \
+            target/release/macos/AppleTree.app \
+            "dist/AppleTree-macOS-${{ matrix.arch }}.zip"
+      
+          shasum -a 256 \
+            "dist/AppleTree-macOS-${{ matrix.arch }}.zip" \
+            > "dist/AppleTree-macOS-${{ matrix.arch }}.zip.sha256"
+      
+      - name: Upload app archive
         uses: actions/upload-artifact@v4
         with:
-          name: AppleTree-macOS
-          path: target/release/macos/AppleTree.app
+          name: AppleTree-macOS-${{ matrix.arch }}
+          path: |
+            dist/AppleTree-macOS-${{ matrix.arch }}.zip
+            dist/AppleTree-macOS-${{ matrix.arch }}.zip.sha256
           if-no-files-found: error
+          retention-days: 30
