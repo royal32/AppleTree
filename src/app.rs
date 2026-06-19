@@ -94,8 +94,11 @@ struct ScopeSpace {
 
 const SCOPE_PANEL_WIDTH: f32 = 280.0;
 const SCOPE_PANEL_GAP: f32 = 8.0;
+const LEFT_RIGHT_FILE_PANEL_MIN_WIDTH: f32 = 200.0;
 const LEFT_RIGHT_SCOPE_PANEL_HEIGHT: f32 = 330.0;
 const LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT: f32 = 190.0;
+const LEFT_RIGHT_SCOPE_COLLAPSE_THRESHOLD: f32 = 64.0;
+const LEFT_RIGHT_SCOPE_SPLITTER_HEIGHT: f32 = 10.0;
 const FILE_TABLE_MIN_HEIGHT: f32 = 220.0;
 const SCOPE_LOGO_MAX_WIDTH: f32 = 90.0;
 const SCOPE_LOGO_BOTTOM_GAP: f32 = 8.0;
@@ -801,7 +804,7 @@ impl LoadedState {
                 let ctx = root_ui.ctx().clone();
                 egui::Panel::left("file_table")
                     .default_size(820.0)
-                    .min_size(640.0)
+                    .min_size(LEFT_RIGHT_FILE_PANEL_MIN_WIDTH)
                     .show_separator_line(false)
                     .frame(
                         egui::Frame::side_top_panel(ctx.global_style().as_ref())
@@ -910,6 +913,8 @@ impl LoadedState {
         let mut command = None;
         let mut pending_scan = None;
         let scope_space = selected_scope_space(&self.scan_paths, self.tree.root.size);
+        let mut scope_height = prefs.left_right_scope_height;
+        let mut scope_collapsed = prefs.left_right_scope_collapsed;
 
         let mut show_table = |ui: &mut egui::Ui| {
             if let Some(cmd) = self.show_file_table(ui, prefs, prefs_changed) {
@@ -922,7 +927,20 @@ impl LoadedState {
         };
         match orientation {
             SplitOrientation::LeftRight => {
-                show_table_scope_column(ui, &mut show_table, &mut show_scope);
+                show_table_scope_column(
+                    ui,
+                    &mut show_table,
+                    &mut show_scope,
+                    &mut scope_height,
+                    &mut scope_collapsed,
+                );
+                if (scope_height - prefs.left_right_scope_height).abs() > 0.5
+                    || scope_collapsed != prefs.left_right_scope_collapsed
+                {
+                    prefs.left_right_scope_height = scope_height;
+                    prefs.left_right_scope_collapsed = scope_collapsed;
+                    *prefs_changed = true;
+                }
             }
             SplitOrientation::TopBottom => {
                 show_table_scope_row(ui, &mut show_table, &mut show_scope);
@@ -1684,6 +1702,8 @@ fn show_table_scope_column(
     ui: &mut egui::Ui,
     mut show_table: impl FnMut(&mut egui::Ui),
     mut show_scope: impl FnMut(&mut egui::Ui),
+    scope_height: &mut f32,
+    scope_collapsed: &mut bool,
 ) {
     let column_size = ui.available_size_before_wrap();
     ui.allocate_ui_with_layout(
@@ -1694,22 +1714,23 @@ fn show_table_scope_column(
             ui.set_max_size(column_size);
 
             let available_h = column_size.y.max(0.0);
-            let scope_height = if available_h
-                >= FILE_TABLE_MIN_HEIGHT + SCOPE_PANEL_GAP + LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT
-            {
-                (available_h - FILE_TABLE_MIN_HEIGHT - SCOPE_PANEL_GAP).clamp(
-                    LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT,
-                    LEFT_RIGHT_SCOPE_PANEL_HEIGHT,
-                )
-            } else {
-                (available_h * 0.42).max(0.0)
-            };
-            let gap = if scope_height > 0.0 {
-                SCOPE_PANEL_GAP
-            } else {
+            let splitter_h = LEFT_RIGHT_SCOPE_SPLITTER_HEIGHT.min(available_h);
+            let max_scope_height = (available_h - FILE_TABLE_MIN_HEIGHT - splitter_h).max(0.0);
+            if max_scope_height <= 0.0 {
+                *scope_collapsed = true;
+            }
+
+            if !*scope_collapsed {
+                let min_scope_height = LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT.min(max_scope_height);
+                *scope_height = scope_height.clamp(min_scope_height, max_scope_height);
+            }
+
+            let visible_scope_height = if *scope_collapsed {
                 0.0
+            } else {
+                scope_height.min(max_scope_height).max(0.0)
             };
-            let table_height = (available_h - scope_height - gap).max(0.0);
+            let table_height = (available_h - visible_scope_height - splitter_h).max(0.0);
 
             let table_size = egui::vec2(column_size.x, table_height);
             ui.allocate_ui_with_layout(
@@ -1722,20 +1743,112 @@ fn show_table_scope_column(
                 },
             );
 
-            ui.add_space(gap);
+            let splitter_response = show_left_right_scope_splitter(ui, *scope_collapsed);
+            let mut split_changed = false;
+            if splitter_response.clicked() {
+                *scope_collapsed = !*scope_collapsed;
+                if !*scope_collapsed && *scope_height < LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT {
+                    *scope_height = LEFT_RIGHT_SCOPE_PANEL_HEIGHT.min(max_scope_height);
+                }
+                split_changed = true;
+            }
+            if splitter_response.dragged() && max_scope_height > 0.0 {
+                if *scope_collapsed {
+                    if splitter_response.drag_delta().y < 0.0 {
+                        *scope_collapsed = false;
+                        *scope_height = LEFT_RIGHT_SCOPE_PANEL_HEIGHT.clamp(
+                            LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT.min(max_scope_height),
+                            max_scope_height,
+                        );
+                        split_changed = true;
+                    }
+                } else {
+                    let min_scope_height = LEFT_RIGHT_SCOPE_PANEL_MIN_HEIGHT.min(max_scope_height);
+                    let new_scope_height = *scope_height - splitter_response.drag_delta().y;
+                    if new_scope_height <= LEFT_RIGHT_SCOPE_COLLAPSE_THRESHOLD {
+                        *scope_collapsed = true;
+                        split_changed = true;
+                    } else {
+                        let resized_height =
+                            new_scope_height.clamp(min_scope_height, max_scope_height);
+                        if (resized_height - *scope_height).abs() > 0.5 {
+                            *scope_height = resized_height;
+                            split_changed = true;
+                        }
+                    }
+                }
+            }
+            if split_changed {
+                ui.ctx().request_repaint();
+            }
 
-            let scope_size = egui::vec2(column_size.x, scope_height);
-            ui.allocate_ui_with_layout(
-                scope_size,
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_size(scope_size);
-                    ui.set_max_size(scope_size);
-                    show_scope(ui);
-                },
-            );
+            if !*scope_collapsed && visible_scope_height > 0.0 {
+                let scope_size = egui::vec2(column_size.x, visible_scope_height);
+                ui.allocate_ui_with_layout(
+                    scope_size,
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(scope_size);
+                        ui.set_max_size(scope_size);
+                        show_scope(ui);
+                    },
+                );
+            }
         },
     );
+}
+
+fn show_left_right_scope_splitter(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+    let size = egui::vec2(ui.available_width(), LEFT_RIGHT_SCOPE_SPLITTER_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let response = response.on_hover_text(if collapsed {
+        "Show scan scope"
+    } else {
+        "Resize or collapse scan scope"
+    });
+
+    if response.hovered() || response.dragged() {
+        ui.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    let visuals = if response.dragged() {
+        ui.visuals().widgets.active
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered
+    } else {
+        ui.visuals().widgets.inactive
+    };
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, visuals.weak_bg_fill);
+    let y = rect.center().y;
+    let line_start = egui::pos2(rect.left() + 10.0, y);
+    let line_end = egui::pos2(rect.right() - 10.0, y);
+    painter.line_segment(
+        [line_start, line_end],
+        egui::Stroke::new(1.0, visuals.bg_stroke.color),
+    );
+
+    let center = rect.center();
+    let chevron_color = visuals.fg_stroke.color;
+    let chevron_stroke = egui::Stroke::new(1.2, chevron_color);
+    let dir = if collapsed { -1.0 } else { 1.0 };
+    painter.line_segment(
+        [
+            egui::pos2(center.x - 5.0, center.y - 1.5 * dir),
+            egui::pos2(center.x, center.y + 2.5 * dir),
+        ],
+        chevron_stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x, center.y + 2.5 * dir),
+            egui::pos2(center.x + 5.0, center.y - 1.5 * dir),
+        ],
+        chevron_stroke,
+    );
+
+    response
 }
 
 fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, space: Option<&ScopeSpace>) {
@@ -2149,6 +2262,8 @@ fn show_empty_panes(
     show_empty_status_bar(root_ui, prefs, prefs_changed, enabled);
 
     let orientation = prefs.split_orientation;
+    let mut scope_height = prefs.left_right_scope_height;
+    let mut scope_collapsed = prefs.left_right_scope_collapsed;
     let mut show_table = |ui: &mut egui::Ui| {
         ui::tree_view::show_empty(ui, prefs, prefs_changed);
     };
@@ -2164,7 +2279,7 @@ fn show_empty_panes(
             let ctx = root_ui.ctx().clone();
             egui::Panel::left("file_table")
                 .default_size(820.0)
-                .min_size(640.0)
+                .min_size(LEFT_RIGHT_FILE_PANEL_MIN_WIDTH)
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::side_top_panel(ctx.global_style().as_ref())
@@ -2174,8 +2289,21 @@ fn show_empty_panes(
                     if !enabled {
                         ui.disable();
                     }
-                    show_table_scope_column(ui, &mut show_table, &mut show_scope);
+                    show_table_scope_column(
+                        ui,
+                        &mut show_table,
+                        &mut show_scope,
+                        &mut scope_height,
+                        &mut scope_collapsed,
+                    );
                 });
+            if (scope_height - prefs.left_right_scope_height).abs() > 0.5
+                || scope_collapsed != prefs.left_right_scope_collapsed
+            {
+                prefs.left_right_scope_height = scope_height;
+                prefs.left_right_scope_collapsed = scope_collapsed;
+                *prefs_changed = true;
+            }
 
             egui::CentralPanel::default().show_inside(root_ui, |ui| {
                 ui::treemap_view::show_empty(ui);
@@ -2320,7 +2448,7 @@ fn show_scan_failed(
     let ctx = root_ui.ctx().clone();
     egui::Panel::left("file_table")
         .default_size(820.0)
-        .min_size(640.0)
+        .min_size(LEFT_RIGHT_FILE_PANEL_MIN_WIDTH)
         .show_separator_line(false)
         .frame(
             egui::Frame::side_top_panel(ctx.global_style().as_ref())

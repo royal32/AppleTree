@@ -167,6 +167,8 @@ pub struct AppPrefs {
     pub sort_descending: bool,
     pub columns: Vec<ColumnPrefs>,
     pub top_bottom_table_height: f32,
+    pub left_right_scope_height: f32,
+    pub left_right_scope_collapsed: bool,
     pub treemap_folder_depth: usize,
     pub treemap_label_depth: usize,
     pub filename_truncation: FilenameTruncation,
@@ -187,6 +189,8 @@ impl Default for AppPrefs {
                 })
                 .collect(),
             top_bottom_table_height: 320.0,
+            left_right_scope_height: 330.0,
+            left_right_scope_collapsed: false,
             treemap_folder_depth: 2,
             treemap_label_depth: 1,
             filename_truncation: FilenameTruncation::Middle,
@@ -234,6 +238,14 @@ impl AppPrefs {
                         prefs.top_bottom_table_height = height.clamp(180.0, 1200.0);
                     }
                 }
+                "left_right_scope_height" => {
+                    if let Ok(height) = value.trim().parse::<f32>() {
+                        prefs.left_right_scope_height = height.clamp(0.0, 1200.0);
+                    }
+                }
+                "left_right_scope_collapsed" => {
+                    prefs.left_right_scope_collapsed = value.trim() == "true";
+                }
                 "treemap_folder_depth" => {
                     if let Ok(depth) = value.trim().parse() {
                         prefs.treemap_folder_depth = depth;
@@ -280,12 +292,14 @@ impl AppPrefs {
             .join(",");
         let direction = if self.sort_descending { "desc" } else { "asc" };
         let text = format!(
-            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\ntreemap_folder_depth={}\ntreemap_label_depth={}\nfilename_truncation={}\ntreemap_palette={}\n",
+            "split={}\nsort={}:{}\ncolumns={}\ntop_bottom_table_height={:.1}\nleft_right_scope_height={:.1}\nleft_right_scope_collapsed={}\ntreemap_folder_depth={}\ntreemap_label_depth={}\nfilename_truncation={}\ntreemap_palette={}\n",
             self.split_orientation.as_str(),
             self.sort_column.id(),
             direction,
             columns,
             self.top_bottom_table_height,
+            self.left_right_scope_height,
+            self.left_right_scope_collapsed,
             self.treemap_folder_depth,
             self.treemap_label_depth,
             self.filename_truncation.as_str(),
@@ -358,9 +372,10 @@ mod tests {
 
     #[test]
     fn default_layout_is_top_bottom() {
-        assert_eq!(
-            AppPrefs::default().split_orientation,
-            SplitOrientation::TopBottom
-        );
+        let prefs = AppPrefs::default();
+
+        assert_eq!(prefs.split_orientation, SplitOrientation::TopBottom);
+        assert_eq!(prefs.left_right_scope_height, 330.0);
+        assert!(!prefs.left_right_scope_collapsed);
     }
 }
