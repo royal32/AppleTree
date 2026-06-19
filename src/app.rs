@@ -1735,13 +1735,10 @@ fn show_table_scope_column(
 }
 
 fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, space: Option<&ScopeSpace>) {
-    let width = ui.available_width().min(SCOPE_LOGO_MAX_WIDTH);
+    let available_width = ui.available_width();
+    let width = available_width.min(SCOPE_LOGO_MAX_WIDTH);
     let aspect = logo.size_vec2().y / logo.size_vec2().x;
-    let logo_width = if space.is_some() {
-        width.min((ui.available_width() - 112.0).max(80.0))
-    } else {
-        width
-    };
+    let logo_width = width.min((available_width - 112.0).max(80.0));
     let size = egui::vec2(logo_width, logo_width * aspect);
     let required_height =
         size.y + SCOPE_LOGO_BOTTOM_GAP + SCOPE_CONTROLS_HEIGHT + SCOPE_LIST_MIN_HEIGHT;
@@ -1749,41 +1746,47 @@ fn show_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, space: Option<
         return;
     }
 
-    if let Some(space) = space {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), size.y),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                paint_scope_logo(ui, logo, size);
-                ui.add_space(8.0);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), size.y),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_height(size.y);
-                        ui.set_max_height(size.y);
-                        ui.vertical(|ui| {
-                            scope_stat_label(ui, format!("Total: {}", format_size(space.total)));
-                            scope_stat_label(ui, format!("Used: {}", format_size(space.used)));
-                            scope_stat_label(ui, format!("Free: {}", format_size(space.free)));
-                        });
-                    },
-                );
-            },
-        );
-    } else {
-        let (slot, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), size.y),
-            egui::Sense::hover(),
-        );
-        let image_rect = egui::Rect::from_center_size(slot.center(), size);
-        paint_scope_logo_at(ui, logo, image_rect);
-    }
+    ui.allocate_ui_with_layout(
+        egui::vec2(available_width, size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            paint_scope_logo(ui, logo, size);
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), size.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(size.y);
+                    ui.set_max_height(size.y);
+                    ui.vertical(|ui| {
+                        scope_stat_label(
+                            ui,
+                            space.map(|space| format!("Total: {}", format_size(space.total))),
+                        );
+                        scope_stat_label(
+                            ui,
+                            space.map(|space| format!("Used: {}", format_size(space.used))),
+                        );
+                        scope_stat_label(
+                            ui,
+                            space.map(|space| format!("Free: {}", format_size(space.free))),
+                        );
+                    });
+                },
+            );
+        },
+    );
     ui.add_space(SCOPE_LOGO_BOTTOM_GAP);
 }
 
-fn scope_stat_label(ui: &mut egui::Ui, text: String) {
-    ui.label(egui::RichText::new(text).size(13.0));
+fn scope_stat_label(ui: &mut egui::Ui, text: Option<String>) {
+    let text = match text {
+        Some(text) => egui::RichText::new(text).size(13.0),
+        None => egui::RichText::new(" ")
+            .size(13.0)
+            .color(egui::Color32::TRANSPARENT),
+    };
+    ui.label(text);
 }
 
 fn paint_scope_logo(ui: &mut egui::Ui, logo: &egui::TextureHandle, size: egui::Vec2) {
