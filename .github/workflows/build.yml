@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Package app bundle
+        run: CODESIGN=0 scripts/package-macos-app.sh
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppleTree-macOS
+          path: target/release/macos/AppleTree.app
+          if-no-files-found: error
