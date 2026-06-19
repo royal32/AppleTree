@@ -19,7 +19,7 @@ fn main() -> eframe::Result<()> {
 }
 
 fn load_icon() -> egui::IconData {
-    let png_bytes = include_bytes!("../launcher_icon.png");
+    let png_bytes = include_bytes!("../AppIcon.png");
     let img = image::load_from_memory(png_bytes)
         .expect("Failed to decode app icon")
         .into_rgba8();
