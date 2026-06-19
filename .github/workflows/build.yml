@@ -1,4 +1,4 @@
-name: Build
+name: Build macOS
 
 on:
   push:
@@ -8,13 +8,26 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
   macos:
-    name: macOS
-    runs-on: macos-latest
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
 
     steps:
       - name: Check out repository
@@ -25,6 +38,15 @@ jobs:
 
       - name: Cache Rust build output
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-${{ matrix.arch }}
+
+      - name: Display build environment
+        run: |
+          sw_vers
+          uname -m
+          rustc --version
+          cargo --version
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -32,11 +54,34 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
-      - name: Build release binary
-        run: cargo build --locked --release
-
       - name: Package app bundle
-        run: CODESIGN=0 scripts/package-macos-app.sh
+        env:
+          CODESIGN: "1"
+          CODESIGN_IDENTITY: "-"
+        run: scripts/package-macos-app.sh
+
+      - name: Verify app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="target/release/macos/AppleTree.app"
+          EXECUTABLE="$APP/Contents/MacOS/appletree"
+
+          test -d "$APP"
+          test -f "$APP/Contents/Info.plist"
+          test -x "$EXECUTABLE"
+
+          plutil -lint "$APP/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          ACTUAL_ARCH="$(lipo -archs "$EXECUTABLE")"
+          echo "Executable architecture: $ACTUAL_ARCH"
+
+          if [[ "$ACTUAL_ARCH" != "${{ matrix.arch }}" ]]; then
+            echo "Expected ${{ matrix.arch }}, but built $ACTUAL_ARCH" >&2
+            exit 1
+          fi
 
       - name: Create distributable ZIP
         shell: bash
