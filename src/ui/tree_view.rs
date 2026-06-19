@@ -312,12 +312,12 @@ fn show_header(
                 if ui.button("Move Column Left").clicked() {
                     prefs.move_column_left(column);
                     *prefs_changed = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Move Column Right").clicked() {
                     prefs.move_column_right(column);
                     *prefs_changed = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 

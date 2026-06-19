@@ -344,7 +344,7 @@ pub fn show(
     }
 
     // Hover tooltip
-    if !ui.ctx().is_context_menu_open()
+    if !ui.ctx().any_popup_open()
         && !response.secondary_clicked()
         && let Some(pos) = response.hover_pos()
         && let Some(hit) = find_node_at(display_root, &state.cache, pos)
@@ -354,7 +354,13 @@ pub fn show(
             .full_display_path_for_id(hit.node.id)
             .unwrap_or_else(|| hit.node.name.to_string());
         let tip = format!("{}\n{}", full_path, format_size(hit.node.size));
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), response.id.with("tip"), |ui| {
+        egui::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            response.id.with("tip"),
+            egui::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
             ui.set_max_width(560.0);
             ui.label(tip);
         });
@@ -635,7 +641,7 @@ fn collect_cushion_leaves(
 }
 
 fn render_cushion_image(pw: usize, ph: usize, canvas: Rect, leaves: &[CushionLeaf]) -> ColorImage {
-    let mut image = ColorImage::new([pw, ph], Color32::TRANSPARENT);
+    let mut image = ColorImage::new([pw, ph], vec![Color32::TRANSPARENT; pw * ph]);
 
     // Precompute normalized light direction
     let (lx, ly, lz) = {

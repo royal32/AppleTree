@@ -485,9 +485,11 @@ fn use_macos_system_font(ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // Global blue selection highlight
-        ctx.style_mut(|style| {
+        ctx.global_style_mut(|style| {
             style.visuals.selection.bg_fill = egui::Color32::from_rgb(56, 132, 244);
         });
 
@@ -507,7 +509,7 @@ impl eframe::App for App {
             AppState::Empty => {
                 let mut scan_paths = None;
                 show_empty_panes(
-                    ctx,
+                    ui,
                     &mut self.prefs,
                     &mut self.prefs_changed,
                     &mut self.scope,
@@ -528,17 +530,17 @@ impl eframe::App for App {
                 if let Some(previous) = previous {
                     previous.pane.hovered = None;
                     let _ = previous.show_disabled_panels(
-                        ctx,
+                        ui,
                         &mut self.prefs,
                         &mut self.scope,
                         &scope_logo,
                         &mut self.prefs_changed,
                     );
-                    previous.memory_relief.run(ctx);
+                    previous.memory_relief.run(&ctx);
                 } else {
                     let mut scan_paths = None;
                     show_empty_panes(
-                        ctx,
+                        ui,
                         &mut self.prefs,
                         &mut self.prefs_changed,
                         &mut self.scope,
@@ -547,20 +549,20 @@ impl eframe::App for App {
                         false,
                     );
                 }
-                cancel_scan_requested = show_scanning_overlay(ctx, paths, start_time.elapsed());
+                cancel_scan_requested = show_scanning_overlay(&ctx, paths, start_time.elapsed());
             }
             AppState::ScanFailed { paths, message } => {
                 let mut retry_paths = None;
-                show_scan_failed(ctx, paths, message, &mut retry_paths);
+                show_scan_failed(ui, paths, message, &mut retry_paths);
                 if let Some(paths) = retry_paths {
                     self.start_scan_paths(paths);
                 }
             }
             AppState::Loaded(loaded) => {
                 loaded.pane.hovered = None;
-                let mut command = handle_delete(loaded, ctx);
+                let mut command = handle_delete(loaded, &ctx);
                 if let Some(ui_command) = loaded.as_mut().show_panels(
-                    ctx,
+                    ui,
                     &mut self.prefs,
                     &mut self.scope,
                     &scope_logo,
@@ -569,9 +571,9 @@ impl eframe::App for App {
                     command = Some(ui_command);
                 }
                 if let Some(command) = command {
-                    execute_node_command(loaded, ctx, command);
+                    execute_node_command(loaded, &ctx, command);
                 }
-                loaded.memory_relief.run(ctx);
+                loaded.memory_relief.run(&ctx);
             }
         }
 
@@ -618,7 +620,7 @@ impl eframe::App for App {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.prefs.save();
     }
 }
@@ -652,47 +654,47 @@ impl LoadedState {
 
     fn show_panels(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
-        self.show_panels_enabled(ctx, prefs, scope, scope_logo, prefs_changed, true)
+        self.show_panels_enabled(root_ui, prefs, scope, scope_logo, prefs_changed, true)
     }
 
     fn show_disabled_panels(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
     ) -> Option<NodeCommand> {
-        self.show_panels_enabled(ctx, prefs, scope, scope_logo, prefs_changed, false)
+        self.show_panels_enabled(root_ui, prefs, scope, scope_logo, prefs_changed, false)
     }
 
     fn show_panels_enabled(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
         prefs_changed: &mut bool,
         enabled: bool,
     ) -> Option<NodeCommand> {
-        self.show_status_bar(ctx, prefs, prefs_changed, enabled);
-        self.show_main_layout(ctx, prefs, scope, scope_logo, prefs_changed, enabled)
+        self.show_status_bar(root_ui, prefs, prefs_changed, enabled);
+        self.show_main_layout(root_ui, prefs, scope, scope_logo, prefs_changed, enabled)
     }
 
     fn show_status_bar(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         prefs_changed: &mut bool,
         enabled: bool,
     ) {
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Panel::bottom("status_bar").show_inside(root_ui, |ui| {
             if !enabled {
                 ui.disable();
             }
@@ -786,7 +788,7 @@ impl LoadedState {
 
     fn show_main_layout(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         prefs: &mut AppPrefs,
         scope: &mut ScanScopeState,
         scope_logo: &egui::TextureHandle,
@@ -796,15 +798,16 @@ impl LoadedState {
         let mut command = None;
         match prefs.split_orientation {
             SplitOrientation::LeftRight => {
-                egui::SidePanel::left("file_table")
-                    .default_width(820.0)
-                    .min_width(640.0)
+                let ctx = root_ui.ctx().clone();
+                egui::Panel::left("file_table")
+                    .default_size(820.0)
+                    .min_size(640.0)
                     .show_separator_line(false)
                     .frame(
-                        egui::Frame::side_top_panel(ctx.style().as_ref())
+                        egui::Frame::side_top_panel(ctx.global_style().as_ref())
                             .inner_margin(egui::Margin::from(8)),
                     )
-                    .show(ctx, |ui| {
+                    .show_inside(root_ui, |ui| {
                         if !enabled {
                             ui.disable();
                         }
@@ -820,7 +823,7 @@ impl LoadedState {
                         }
                     });
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_inside(root_ui, |ui| {
                     if !enabled {
                         ui.disable();
                     }
@@ -830,15 +833,16 @@ impl LoadedState {
                 });
             }
             SplitOrientation::TopBottom => {
-                let table_response = egui::TopBottomPanel::top("file_table_top")
-                    .default_height(prefs.top_bottom_table_height)
-                    .min_height(180.0)
+                let ctx = root_ui.ctx().clone();
+                let table_response = egui::Panel::top("file_table_top")
+                    .default_size(prefs.top_bottom_table_height)
+                    .min_size(180.0)
                     .resizable(enabled)
                     .frame(
-                        egui::Frame::side_top_panel(ctx.style().as_ref())
+                        egui::Frame::side_top_panel(ctx.global_style().as_ref())
                             .inner_margin(egui::Margin::from(8)),
                     )
-                    .show(ctx, |ui| {
+                    .show_inside(root_ui, |ui| {
                         if !enabled {
                             ui.disable();
                         }
@@ -859,7 +863,7 @@ impl LoadedState {
                     *prefs_changed = true;
                 }
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_inside(root_ui, |ui| {
                     if !enabled {
                         ui.disable();
                     }
@@ -2134,7 +2138,7 @@ fn execute_delete(loaded: &mut LoadedState, target: &DeleteTarget) {
 
 /// Render the three-pane layout with empty panels (same IDs as Loaded state).
 fn show_empty_panes(
-    ctx: &egui::Context,
+    root_ui: &mut egui::Ui,
     prefs: &mut AppPrefs,
     prefs_changed: &mut bool,
     scope: &mut ScanScopeState,
@@ -2142,7 +2146,7 @@ fn show_empty_panes(
     scan_request: &mut Option<Vec<PathBuf>>,
     enabled: bool,
 ) {
-    show_empty_status_bar(ctx, prefs, prefs_changed, enabled);
+    show_empty_status_bar(root_ui, prefs, prefs_changed, enabled);
 
     let orientation = prefs.split_orientation;
     let mut show_table = |ui: &mut egui::Ui| {
@@ -2157,42 +2161,44 @@ fn show_empty_panes(
 
     match orientation {
         SplitOrientation::LeftRight => {
-            egui::SidePanel::left("file_table")
-                .default_width(820.0)
-                .min_width(640.0)
+            let ctx = root_ui.ctx().clone();
+            egui::Panel::left("file_table")
+                .default_size(820.0)
+                .min_size(640.0)
                 .show_separator_line(false)
                 .frame(
-                    egui::Frame::side_top_panel(ctx.style().as_ref())
+                    egui::Frame::side_top_panel(ctx.global_style().as_ref())
                         .inner_margin(egui::Margin::from(8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(root_ui, |ui| {
                     if !enabled {
                         ui.disable();
                     }
                     show_table_scope_column(ui, &mut show_table, &mut show_scope);
                 });
 
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show_inside(root_ui, |ui| {
                 ui::treemap_view::show_empty(ui);
             });
         }
         SplitOrientation::TopBottom => {
-            egui::TopBottomPanel::top("file_table_top")
-                .default_height(360.0)
-                .min_height(180.0)
+            let ctx = root_ui.ctx().clone();
+            egui::Panel::top("file_table_top")
+                .default_size(360.0)
+                .min_size(180.0)
                 .resizable(false)
                 .frame(
-                    egui::Frame::side_top_panel(ctx.style().as_ref())
+                    egui::Frame::side_top_panel(ctx.global_style().as_ref())
                         .inner_margin(egui::Margin::from(8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(root_ui, |ui| {
                     if !enabled {
                         ui.disable();
                     }
                     show_table_scope_row(ui, &mut show_table, &mut show_scope);
                 });
 
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show_inside(root_ui, |ui| {
                 ui::treemap_view::show_empty(ui);
             });
         }
@@ -2200,12 +2206,12 @@ fn show_empty_panes(
 }
 
 fn show_empty_status_bar(
-    ctx: &egui::Context,
+    root_ui: &mut egui::Ui,
     prefs: &mut AppPrefs,
     prefs_changed: &mut bool,
     enabled: bool,
 ) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+    egui::Panel::bottom("status_bar").show_inside(root_ui, |ui| {
         if !enabled {
             ui.disable();
         }
@@ -2253,7 +2259,7 @@ fn show_empty_status_bar(
 }
 
 fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Duration) -> bool {
-    let screen_rect = ctx.screen_rect();
+    let screen_rect = ctx.content_rect();
     let mut cancel_requested = false;
 
     egui::Area::new(egui::Id::new("scan_overlay_blocker"))
@@ -2299,28 +2305,30 @@ fn show_scanning_overlay(ctx: &egui::Context, paths: &[PathBuf], elapsed: Durati
 }
 
 fn show_scan_failed(
-    ctx: &egui::Context,
+    root_ui: &mut egui::Ui,
     paths: &[PathBuf],
     message: &str,
     retry_paths: &mut Option<Vec<PathBuf>>,
 ) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+    egui::Panel::bottom("status_bar").show_inside(root_ui, |ui| {
         ui.colored_label(
             egui::Color32::from_rgb(220, 80, 80),
             format!("Failed to scan {}", scan_scope_display(paths)),
         );
     });
 
-    egui::SidePanel::left("file_table")
-        .default_width(820.0)
-        .min_width(640.0)
+    let ctx = root_ui.ctx().clone();
+    egui::Panel::left("file_table")
+        .default_size(820.0)
+        .min_size(640.0)
         .show_separator_line(false)
         .frame(
-            egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin::from(8)),
+            egui::Frame::side_top_panel(ctx.global_style().as_ref())
+                .inner_margin(egui::Margin::from(8)),
         )
-        .show(ctx, |_ui| {});
+        .show_inside(root_ui, |_ui| {});
 
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default().show_inside(root_ui, |ui| {
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Scan Failed");

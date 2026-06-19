@@ -80,11 +80,11 @@ pub(crate) fn node_context_menu(
 ) {
     if can_zoom_in && ui.button(zoom_in_label).clicked() {
         *command = Some(NodeCommand::ZoomIn(id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Zoom Out").clicked() {
         *command = Some(NodeCommand::ZoomOut);
-        ui.close_menu();
+        ui.close();
     }
     let shrink_label = if is_shrunk {
         "Unshrink in Treemap"
@@ -93,25 +93,25 @@ pub(crate) fn node_context_menu(
     };
     if ui.button(shrink_label).clicked() {
         *command = Some(NodeCommand::ToggleShrink(id));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     if ui.button("Open").clicked() {
         *command = Some(NodeCommand::Open(id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Reveal in Finder").clicked() {
         *command = Some(NodeCommand::Reveal(id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Copy Path").clicked() {
         *command = Some(NodeCommand::CopyPath(id));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     if ui.button("Delete").clicked() {
         *command = Some(NodeCommand::Delete { id, confirm: true });
-        ui.close_menu();
+        ui.close();
     }
 }
 
