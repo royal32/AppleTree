@@ -176,7 +176,7 @@ pub struct AppPrefs {
 impl Default for AppPrefs {
     fn default() -> Self {
         Self {
-            split_orientation: SplitOrientation::LeftRight,
+            split_orientation: SplitOrientation::TopBottom,
             sort_column: TableColumn::Size,
             sort_descending: true,
             columns: TableColumn::ALL
@@ -350,4 +350,17 @@ fn settings_path() -> Option<PathBuf> {
             .join("AppleTree")
             .join("settings.txt"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_layout_is_top_bottom() {
+        assert_eq!(
+            AppPrefs::default().split_orientation,
+            SplitOrientation::TopBottom
+        );
+    }
 }
