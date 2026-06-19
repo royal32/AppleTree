@@ -1,5 +1,4 @@
-<img src="src/ui/assets/black_text_with_white_backdrop.png" alt="AppleTree Logo" width="100" />
-# AppleTree
+<img src="src/ui/assets/black_text_with_white_backdrop.png" alt="AppleTree Logo" width="130" />
 
 A fast disk usage visualizer for macOS, inspired by [WinDirStat](https://windirstat.net/) and [WizTree](https://diskanalyzer.com/), and forked from MacDirStat.
 
